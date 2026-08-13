@@ -1,4 +1,4 @@
-# ===== 编译产物（不推送）=====
+# ===== 构建产物 =====
 out/
 *.o
 *.obj
@@ -23,7 +23,7 @@ vmlinux
 vmlinux.o
 System.map
 
-# ===== 压缩归档 / 上游源码包（本地保留，不推送）=====
+# ===== 压缩归档（默认忽略，上游源码包见下方白名单）=====
 *.tgz
 *.tar.gz
 *.tar.bz2
@@ -36,7 +36,14 @@ System.map
 *.7z
 *.rar
 
-# ===== 镜像与固件产物 =====
+# ===== 保留的小体积上游源码包 =====
+!main/src/platform/u-boot/u-boot-2022.07.tar.bz2
+!main/src/platform/arm-trusted-firmware/arm-trusted-firmware-2.7.tar.gz
+!opensource/*/*.tar.bz2
+!opensource/*/*.tar.gz
+!opensource/*/*.tar.xz
+
+# ===== 镜像 / 固件产物 =====
 *.img
 *.jffs2
 *.ubifs
@@ -48,7 +55,7 @@ System.map
 *.hex
 *.bin
 
-# ===== 日志 / 媒体样本 / 数据文件 =====
+# ===== 日志 / 媒体样本 / 数据 =====
 *.log
 *.pcm
 *.yuv
@@ -56,27 +63,76 @@ System.map
 *.h265
 *.ortm
 
-# ===== 提取并编译过的上游源码树（可用补丁 + 上游源码包重建）=====
+# ===== 提取并编译过的上游源码树（用源码包 + 补丁重建）=====
 main/src/platform/linux/linux-5.10.y/
 main/src/platform/u-boot/u-boot-2022.07/
 main/src/platform/arm-trusted-firmware/arm-trusted-firmware-2.7/
+opensource/busybox/busybox-1.34.1/
+opensource/e2fsprogs/e2fsprogs-1.46.4_board/
+opensource/e2fsprogs/e2fsprogs-1.46.4_pc/
+opensource/gzip/gzip-1.11/
+opensource/json/cJSON-1.7.18/
+opensource/mtd-utils/mtd-utils-2.1.4_board/
+opensource/mtd-utils/mtd-utils-2.1.4_pc/
+opensource/openssl/openssl-3.2.0/
+opensource/xml2/libxml2-2.9.0_board/
+opensource/zlib/zlib-1.2.12_board/
+opensource/zlib/zlib-1.2.12_pc/
+
+# ===== 第三方包的预编译输出 =====
+opensource/ethtool/bin/
+opensource/eudev/rootfs/
+opensource/gzip/bin/
 
 # ===== 发布产物（镜像、预编译二进制与库）=====
 main/pub/
 
-# ===== opensource 中的构建产物与测试数据 =====
-opensource/**/*.a
-opensource/**/*.so
-opensource/openssl/openssl-3.2.0/test/
-opensource/openssl/openssl-3.2.0/fuzz/
-opensource/openssl/openssl-3.2.0/apps/openssl
-opensource/e2fsprogs/**/tests/
+# ===== 编译出的 sample / 工具二进制 =====
+main/src/boot/otfl/pub/otfl
+main/src/component/board_info/sample/sample_board_info
+main/src/component/driver/adc/sample/sample_adc
+main/src/component/driver/watchdog/sample/sample_wtdg
+main/src/component/media/sample/ao/sample_ao
+main/src/component/media/sample/dis/dis_dump
+main/src/component/media/sample/dis/dis_send
+main/src/component/media/sample/dis/sample_dis
+main/src/component/media/sample/eeprom/test_eeprom
+main/src/component/media/sample/hot_plugin/sample_hot_plugin
+main/src/component/media/sample/imu_app/imu_app
+main/src/component/media/sample/media_ai/sample_media_ai
+main/src/component/media/sample/mipi/sample_mipi
+main/src/component/media/sample/oge/sample_oge
+main/src/component/media/sample/pipline/sample_media_pipe
+main/src/component/media/sample/quickboot/sample_quickboot
+main/src/component/media/sample/scene_auto/sample_scene
+main/src/component/media/sample/smr/sample_smr
+main/src/component/media/sample/sys/sample_media_sys
+main/src/component/media/sample/uvc_app/uvc_app
+main/src/component/media/sample/uvc_test/test_vo
+main/src/component/media/sample/uvc_test/uvc_test
+main/src/component/media/sample/vdec/sample_vdec
+main/src/component/media/sample/venc/sample_venc
+main/src/component/media/sample/vi/sample_vi
+main/src/component/media/sample/vo/sample_vo
+main/src/component/media/sample/vproc/sample_vproc
+main/src/component/npu/samples/ortm_run_model/ortm_run_model
+main/src/component/upgrade/ota_prepare/ota_prepare
+main/src/component/upgrade/sample/sample_upgrade
+main/src/component/upgrade/usb_receiver/usb_receiver
+main/src/platform/fs/userfs/base/stereo/imu_app
+main/src/platform/fs/userfs/base/stereo/uvc_app
+main/src/platform/fs/userfs/userfs/stereo/imu_app
+main/src/platform/fs/userfs/userfs/stereo/uvc_app
 
-# ===== 板端预编译工具 =====
+# ===== 预编译 PC / 板端工具 =====
+main/tools/pc/image_tool/third_party/
+main/tools/pc/partition_env/tool/
+main/tools/pc/romfs/
+main/tools/board/reg-tools-1.0.0/bin/
 tools/board/LQ560V100_PQ/libs/
 tools/board/LQ560V100_PQ/pq_server
 
-# ===== 无读取权限的 rootfs 模板目录 =====
+# ===== 无权限读取的 rootfs 模板目录 =====
 main/src/platform/fs/rootfs/rootfs/boot/
 main/src/platform/fs/rootfs/rootfs/root/
 

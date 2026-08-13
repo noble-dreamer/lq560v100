@@ -1,0 +1,151 @@
+echo "=== Pushing RNDIS + SSH + IMU boot scripts ==="
+mkdir -p /opt/bin
+if [ -f /opt/user_init.sh ] && [ ! -f /opt/user_init.sh.pre_rndis_bak ]; then cp /opt/user_init.sh /opt/user_init.sh.pre_rndis_bak; fi
+if [ -f /opt/bin/usb-ether.sh ] && [ ! -f /opt/bin/usb-ether.sh.pre_rndis_bak ]; then cp /opt/bin/usb-ether.sh /opt/bin/usb-ether.sh.pre_rndis_bak; fi
+: > /opt/bin/usb-ether.sh.new
+printf '%s' 'IyEvYmluL3NoCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyB1c2ItZXRoZXIuc2ggLSBCcmluZyB1cCBVU0IgUk5ESVMgKyBBQ00gZ2FkZ2V0IGFuZCBib2FyZCB1c2IwIElQCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyBEZXBsb3kgdG86IC9vcHQvYmluL3VzYi1ldGhlci5zaAo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'VklEPSIke1VTQl9WSUQ6LTB4M2VmNX0iCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'UElEPSIke1VTQl9QSUQ6LTB4MTViMH0iCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'TUFOVUZBQ1RVUkVSPSIke1VTQl9NQU5VRkFDVFVSRVI6LU9yaXRla30iCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'UFJPRFVDVD0iJHtVU0JfUFJPRFVDVDotRXRoZXJuZXR9Igo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'U0VSSUFMTlVNQkVSPSIke1VTQl9TRVJJQUxOVU1CRVI6LTEyMzQ1Nn0iCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Qk9BUkRfSVA9IiR7Qk9BUkRfSVA6LTE5Mi4xNjguMS4xMDF9Igo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'VURDX05BTUU9IiQobHMgL3N5cy9jbGFzcy91ZGMvIDI+L2Rldi9udWxsIHwgaGVhZCAtMSkiCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'R0FER0VUX0RJUj0vc3lzL2tlcm5lbC9jb25maWcvdXNiX2dhZGdldC9ldGhlcgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'bW91bnQgLXQgY29uZmlnZnMgbm9uZSAvc3lzL2tlcm5lbC9jb25maWcvIDI+L2Rldi9udWxsCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'aWYgWyAteiAiJFVEQ19OQU1FIiBdOyB0aGVuCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgIGVjaG8gIkVSUk9SOiBubyBVREMgZm91bmQiCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgIGV4aXQgMQo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZmkK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyBJZiB0aGUgZmFjdG9yeSBjYW1lcmEgZ2FkZ2V0IHN0aWxsIG93bnMgdGhlIFVEQywgdXNlIGl0cyBjb250cm9sbGVyIGZvciB0aGUK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyByZXF1aXJlZCBzdG9wIG9yZGVyOiB1dmNfYXBwIG11c3QgY2xvc2UgaXRzIFY0TDIgaGFuZGxlIGJlZm9yZSB0aGUgVURDIGlzCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyB1bmJvdW5kLiBEaXJlY3RseSB1bmJpbmRpbmcgYSBsaXZlIFVWQyBnYWRnZXQgY2FuIHBhbmljIHRoaXMga2VybmVsLgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'aWYgWyAtZiAvc3lzL2tlcm5lbC9jb25maWcvdXNiX2dhZGdldC9jYW1lcmEvVURDIF07IHRoZW4K' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgIENBTUVSQV9VREM9IiQoY2F0IC9zeXMva2VybmVsL2NvbmZpZy91c2JfZ2FkZ2V0L2NhbWVyYS9VREMgMj4vZGV2L251bGwpIgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgIGlmIFsgLW4gIiRDQU1FUkFfVURDIiBdOyB0aGVuCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgICAgICBpZiBbIC14IC9ldGMvdXNiX21vZGVfY3RsLnNoIF07IHRoZW4K' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgICAgICAgICAgL2V0Yy91c2JfbW9kZV9jdGwuc2ggc3RvcAo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgICAgICBlbHNlCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgICAgICAgICAgZWNobyAiIiA+IC9zeXMva2VybmVsL2NvbmZpZy91c2JfZ2FkZ2V0L2NhbWVyYS9VREMgMj4vZGV2L251bGwK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgICAgICBmaQo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgICAgICBzbGVlcCAxCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgIGZpCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZmkK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'bWtkaXIgLXAgIiRHQURHRVRfRElSIgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Y2QgIiRHQURHRVRfRElSIiB8fCBleGl0IDEK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyBBbHJlYWR5IGJvdW5kOiBvbmx5IGVuc3VyZSB0aGUgYm9hcmQgSVAuICBPcGVuU1NIIGlzIHRoZSBpbnRlbmRlZCByZW1vdGUK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyBhY2Nlc3Mgc2VydmljZTsgRlRQIGlzIHN0YXJ0ZWQgdGVtcG9yYXJpbHkgZnJvbSB0aGUgY29uc29sZSBmb3IgYm9vdHN0cmFwLgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'aWYgWyAtbiAiJChjYXQgVURDIDI+L2Rldi9udWxsKSIgXTsgdGhlbgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgIGlmY29uZmlnIHVzYjAgIiRCT0FSRF9JUCIgMj4vZGV2L251bGwK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ICAgIGV4aXQgMAo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZmkK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiMHgwMzAwIiA+IGJjZFVTQgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiMHhlZiIgPiBiRGV2aWNlQ2xhc3MK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiMiIgPiBiRGV2aWNlU3ViQ2xhc3MK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiJFZJRCIgPiBpZFZlbmRvcgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiJFBJRCIgPiBpZFByb2R1Y3QK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiMHgzMDAwIiA+IGJjZERldmljZQo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiMHgwMSIgPiBiRGV2aWNlUHJvdG9jb2wK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'bWtkaXIgLXAgc3RyaW5ncy8weDQwOSBjb25maWdzL2MuMS9zdHJpbmdzLzB4NDA5Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiJE1BTlVGQUNUVVJFUiIgPiBzdHJpbmdzLzB4NDA5L21hbnVmYWN0dXJlcgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiJFBST0RVQ1QiID4gc3RyaW5ncy8weDQwOS9wcm9kdWN0Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiJFNFUklBTE5VTUJFUiIgPiBzdHJpbmdzLzB4NDA5L3NlcmlhbG51bWJlcgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiMHhDMCIgPiBjb25maWdzL2MuMS9ibUF0dHJpYnV0ZXMK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiMSIgPiBjb25maWdzL2MuMS9NYXhQb3dlcgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiUk5ESVMiID4gY29uZmlncy9jLjEvc3RyaW5ncy8weDQwOS9jb25maWd1cmF0aW9uCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiMSIgPiBvc19kZXNjL3VzZQo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiMHhjZCIgPiBvc19kZXNjL2JfdmVuZG9yX2NvZGUK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiTVNGVDEwMCIgPiBvc19kZXNjL3F3X3NpZ24K' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'bWtkaXIgLXAgZnVuY3Rpb25zL3JuZGlzLnVzYjAK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiUk5ESVMiID4gZnVuY3Rpb25zL3JuZGlzLnVzYjAvb3NfZGVzYy9pbnRlcmZhY2Uucm5kaXMvY29tcGF0aWJsZV9pZAo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiNTE2MjAwMSIgPiBmdW5jdGlvbnMvcm5kaXMudXNiMC9vc19kZXNjL2ludGVyZmFjZS5ybmRpcy9zdWJfY29tcGF0aWJsZV9pZAo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'WyAtZSBjb25maWdzL2MuMS9ybmRpcy51c2IwIF0gfHwgbG4gLXMgZnVuY3Rpb25zL3JuZGlzLnVzYjAgY29uZmlncy9jLjEvCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'WyAtZSBvc19kZXNjL2MuMSBdIHx8IGxuIC1zIGNvbmZpZ3MvYy4xIG9zX2Rlc2MK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'bWtkaXIgLXAgZnVuY3Rpb25zL2FjbS51c2IwCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'WyAtZSBjb25maWdzL2MuMS9hY20udXNiMCBdIHx8IGxuIC1zIGZ1bmN0aW9ucy9hY20udXNiMCBjb25maWdzL2MuMS8K' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'ZWNobyAiJFVEQ19OQU1FIiA+IFVEQwo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'c2xlZXAgMC41Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'aWZjb25maWcgdXNiMCAiJEJPQVJEX0lQIgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyBJTVVfQVBQIGlzIGRpc2FibGVkIGluIHRoaXMgcHJvZmlsZS4gIEtlZXAgdHR5R1MwIGFzIGEgMS41IE1icHMgZ2V0dHkK' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyBjb25zb2xlIGZvciByZWNvdmVyeTsgU1NIIGl0c2VsZiBydW5zIG92ZXIgUk5ESVMvdXNiMC4K' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'cGlkb2YgZ2V0dHkgPi9kZXYvbnVsbCAyPiYxIHx8IHNldHNpZCBnZXR0eSAtTCAxNTAwMDAwIHR0eUdTMCB2dDEwMCAmCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+sed -i "s/\r$//" /opt/bin/usb-ether.sh.new
+chmod +x /opt/bin/usb-ether.sh.new
+if sh -n /opt/bin/usb-ether.sh.new; then mv /opt/bin/usb-ether.sh.new /opt/bin/usb-ether.sh; else echo "ERROR: syntax check failed for /opt/bin/usb-ether.sh"; fi
+echo "/opt/bin/usb-ether.sh: $(wc -l < /opt/bin/usb-ether.sh) lines"
+: > /opt/user_init.sh.new
+printf '%s' 'IyEvYmluL3NoCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyB1c2VyX2luaXQuc2ggLSBCb2FyZCBib290IHNjcmlwdCBmb3IgUk5ESVMgKyBTU0ggbW9kZQo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Iwo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBEZXBsb3kgdG86IC9vcHQvdXNlcl9pbml0LnNoIChiYWNrIHVwIHRoZSBjdXJyZW50IGZpbGUgZmlyc3QpCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Iwo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBEaXJlY3QgV2luZG93cyA8LT4gYm9hcmQgU1NIIHVzZXMgdXNiMCBvbmx5LiAgTm8gV1NML05GUyByZXR1cm4gcm91dGUgaXMK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBpbnN0YWxsZWQgaGVyZS4gIElNVV9BUFAgaXMgaW50ZW50aW9uYWxseSBkaXNhYmxlZCwgc28gdHR5R1MwIHJlbWFpbnMgdGhlCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBVU0IgQUNNIGdldHR5IGNvbnNvbGUgdXNlZCBvbmx5IGZvciByZWNvdmVyeS9kZXBsb3ltZW50IGJlZm9yZSBTU0ggaXMgdXAuCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyAtLS0gU3RhbmRhcmQgaW5pdCAtLS0K' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'dXNlcl9tb3VudF9kaXI9L29wdAo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ZXhwb3J0IExEX0xJQlJBUllfUEFUSD0kdXNlcl9tb3VudF9kaXIvbGliLzokTERfTElCUkFSWV9QQVRICg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ZXhwb3J0IFBBVEg9JFBBVEg6L29wdC9iaW4K' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'aWYgWyAtZSAkdXNlcl9tb3VudF9kaXIvb21wbW9kL2xvYWRfbHE1NjB2MTAwIF07dGhlbgo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ICAgIGNkICR1c2VyX21vdW50X2Rpci9vbXBtb2QvCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ICAgIC4vbG9hZF9scTU2MHYxMDAgLWkK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ZmkK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'aWYgWyAtZSAkdXNlcl9tb3VudF9kaXIvb21wbW9kL2xvYWRfbHE1NjB2MTAwX3F1aWNrYm9vdF9zdGFnZV8yIF07dGhlbgo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ICAgIGNkICR1c2VyX21vdW50X2Rpci9vbXBtb2QvCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ICAgIC4vbG9hZF9scTU2MHYxMDBfcXVpY2tib290X3N0YWdlXzIgLWkK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ZmkK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'aWYgWyAtZSAkdXNlcl9tb3VudF9kaXIva2VybW9kL2xvYWRfa2VybW9kLnNoIF07dGhlbgo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ICAgIGNkICR1c2VyX21vdW50X2Rpci9rZXJtb2QvCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ICAgIC4vbG9hZF9rZXJtb2Quc2gK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ZmkK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ZWNobyBkZXZpY2UgPiAvcHJvYy8xMDMyMDAwMC51c2IzMGRyZC9tb2RlCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'c2xlZXAgMgo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBVU0IgR2FkZ2V0OiBSTkRJUyArIEFDTS4gIFVzZSB0aGUgYm9hcmQncyBvd24gc2FmZSBVVkMgdGVhcmRvd24gYmVmb3JlCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBjbGFpbWluZyB0aGUgc2hhcmVkIFVEQywgZXZlbiB0aG91Z2ggbm9ybWFsIFJORElTIGJvb3RzIGhhdmUgbm8gY2FtZXJhIGdhZGdldC4K' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'WyAteCAvZXRjL3VzYl9tb2RlX2N0bC5zaCBdICYmIC9ldGMvdXNiX21vZGVfY3RsLnNoIHN0b3AK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'L29wdC9iaW4vdXNiLWV0aGVyLnNoCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'KCBzbGVlcCA1OyBbIC16ICIkKGNhdCAvc3lzL2tlcm5lbC9jb25maWcvdXNiX2dhZGdldC9ldGhlci9VREMgMj4vZGV2L251bGwpIiBdICYmIC9vcHQvYmluL3VzYi1ldGhlci5zaCApICYK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBTdGFydCBPcGVuU1NIIChhY2NvdW50IGZpeCArIHNzaGQpCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'aWYgWyAteCAvZGF0YS9vcGVuc3NoL3N0YXJ0X3NzaGQuc2ggXTsgdGhlbgo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ICAgIC9kYXRhL29wZW5zc2gvc3RhcnRfc3NoZC5zaCAmCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ZmkK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBEbyBub3QgY2FsbCAvb3B0L3N0ZXJlby9ydW4uc2ggaW4gUk5ESVMgbW9kZTogaXQgYnVpbGRzIHRoZSBVVkMgY2FtZXJhCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBnYWRnZXQgYW5kIHdvdWxkIGF0dGVtcHQgdG8gYmluZCB0aGUgVURDIGFscmVhZHkgb3duZWQgYnkgZXRoZXIuICBEbyBub3QK' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBzdGFydCBpbXVfYXBwIG9yIHVwZ3JhZGVfdHJpZ2dlcmQgZWl0aGVyOyBnZXR0eSBpcyBzdGFydGVkIGJ5IHVzYi1ldGhlci5zaC4K' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
+sed -i "s/\r$//" /opt/user_init.sh.new
+chmod +x /opt/user_init.sh.new
+if sh -n /opt/user_init.sh.new; then mv /opt/user_init.sh.new /opt/user_init.sh; else echo "ERROR: syntax check failed for /opt/user_init.sh"; fi
+echo "/opt/user_init.sh: $(wc -l < /opt/user_init.sh) lines"
+echo "=== VERIFY ==="
+grep -n "run.sh\|getty\|imu_app" /opt/user_init.sh /opt/bin/usb-ether.sh
+echo "=== DONE: reboot only after the full OpenSSH bundle is deployed ==="
