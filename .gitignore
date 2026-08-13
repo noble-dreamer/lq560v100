@@ -1,5 +1,7 @@
 # ===== 构建产物 =====
 out/
+__pycache__/
+*.pyc
 *.o
 *.obj
 *.cmd
