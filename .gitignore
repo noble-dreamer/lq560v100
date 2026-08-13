@@ -127,12 +127,7 @@ main/src/platform/fs/userfs/userfs/stereo/imu_app
 main/src/platform/fs/userfs/userfs/stereo/uvc_app
 
 # ===== 预编译 PC / 板端工具 =====
-main/tools/pc/image_tool/third_party/
-main/tools/pc/partition_env/tool/
-main/tools/pc/romfs/
 main/tools/board/reg-tools-1.0.0/bin/
-tools/board/LQ560V100_PQ/libs/
-tools/board/LQ560V100_PQ/pq_server
 
 # ===== 无权限读取的 rootfs 模板目录 =====
 main/src/platform/fs/rootfs/rootfs/boot/
