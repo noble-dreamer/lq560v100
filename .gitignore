@@ -1,0 +1,85 @@
+# ===== 编译产物（不推送）=====
+out/
+*.o
+*.obj
+*.cmd
+*.mod
+*.mod.c
+*.mod.o
+*.ko
+*.builtin
+built-in.a
+*.order
+modules.order
+Module.symvers
+*.symvers
+*.su
+*.d
+*.map
+*.gmo
+*.mo
+.tmp_versions/
+vmlinux
+vmlinux.o
+System.map
+
+# ===== 压缩归档 / 上游源码包（本地保留，不推送）=====
+*.tgz
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar
+*.zip
+*.gz
+*.bz2
+*.xz
+*.7z
+*.rar
+
+# ===== 镜像与固件产物 =====
+*.img
+*.jffs2
+*.ubifs
+*.ext2
+*.ext3
+*.ext4
+*.dtb
+*.elf
+*.hex
+*.bin
+
+# ===== 日志 / 媒体样本 / 数据文件 =====
+*.log
+*.pcm
+*.yuv
+*.h264
+*.h265
+*.ortm
+
+# ===== 提取并编译过的上游源码树（可用补丁 + 上游源码包重建）=====
+main/src/platform/linux/linux-5.10.y/
+main/src/platform/u-boot/u-boot-2022.07/
+main/src/platform/arm-trusted-firmware/arm-trusted-firmware-2.7/
+
+# ===== 发布产物（镜像、预编译二进制与库）=====
+main/pub/
+
+# ===== opensource 中的构建产物与测试数据 =====
+opensource/**/*.a
+opensource/**/*.so
+opensource/openssl/openssl-3.2.0/test/
+opensource/openssl/openssl-3.2.0/fuzz/
+opensource/openssl/openssl-3.2.0/apps/openssl
+opensource/e2fsprogs/**/tests/
+
+# ===== 板端预编译工具 =====
+tools/board/LQ560V100_PQ/libs/
+tools/board/LQ560V100_PQ/pq_server
+
+# ===== 无读取权限的 rootfs 模板目录 =====
+main/src/platform/fs/rootfs/rootfs/boot/
+main/src/platform/fs/rootfs/rootfs/root/
+
+# ===== 本地工具目录（不属于 SDK）=====
+.agents/
+.codex/
