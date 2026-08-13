@@ -169,6 +169,17 @@ DATAFS_JFFS2_IMAGE_BIN_64K:=datafs_$(CHIP)_64k.jffs2
 DATAFS_JFFS2_IMAGE_BIN_128K:=datafs_$(CHIP)_128k.jffs2
 DATAFS_JFFS2_IMAGE_BIN_256K:=datafs_$(CHIP)_256k.jffs2
 
+# NAND datafs volume size. lq560plusv100 (normal mode) has a 45568K data
+# partition: use 44M so the UBIFS volume fills it without exceeding the
+# partition (or the 128M total NAND). AB mode keeps the legacy 27M image
+# because its data partition is only 27M.
+DATAFS_NAND_SIZE ?= 27M
+ifeq ($(CHIP),lq560plusv100)
+ifneq ($(BOOT_MODE),ab)
+DATAFS_NAND_SIZE = 44M
+endif
+endif
+
 ROMFS_IMAGE_BIN:=rootfs_$(CHIP).ramdisk
 
 EMMC_USERFS_SIZE ?= 96
@@ -570,7 +581,7 @@ endif
 ##########################################################################################
 #task [9]	build rootfs
 ##########################################################################################
-rootfs_build: busybox mtd_utils_board gzip
+rootfs_build: busybox mtd_utils_board gzip datafs_build
 	@echo -e $(GREEN)"---------task [9] build rootfs"  $(DONE)
 	@rm $(IMAGES_DIR)/$(PUB_ROOTFS)/dev/* -rf
 
@@ -601,6 +612,15 @@ endif
 	@cp $(MAIN_DIR)/src/component/upgrade/ota_prepare/ota_prepare $(IMAGES_DIR)/$(PUB_ROOTFS)/usr/bin/ -vp
 	@install -m 0644 $(PC_TOOLS_DIR)/mkupgrade/ota_pubkey.bin $(IMAGES_DIR)/$(PUB_ROOTFS)/etc/ota_pubkey.bin
 	@chmod +x $(PC_TOOLS_DIR)/compress/kernel_compress.sh
+ifeq ($(CHIP),lq560plusv100)
+ifneq ($(BOOT_MODE),ab)
+	## One-time /data grow payload for NAND OTA: ship the empty 44M datafs
+	## UBI image and a marker. S90user re-creates the data volume once with
+	## this image so existing boards get the full partition size.
+	@touch $(IMAGES_DIR)/$(PUB_ROOTFS)/etc/grow_data_once
+	@cp $(IMAGES_DIR)/$(PUB_IMAGE)/datafs_$(CHIP)_2k_128k_$(DATAFS_NAND_SIZE).ubifs $(IMAGES_DIR)/$(PUB_ROOTFS)/etc/datafs_grow.ubi
+endif
+endif
 ifeq ($(BOOT_MEDIA), spi)
 	@cp ${OPEN_SOURCE}/mtd-utils/out/board/bin/ubiattach $(IMAGES_DIR)/$(PUB_ROOTFS)/usr/bin/ -vp
 endif
@@ -879,10 +899,10 @@ ifeq ($(BOOT_MEDIA),emmc)
 else
 	@cp $(PC_TOOLS_DIR)/ubi_sh/mkubiimg.sh $(IMAGES_DIR)/$(PUB_IMAGE)
 	@chmod +x $(IMAGES_DIR)/$(PUB_IMAGE)/mkubiimg.sh
-	# build the pagesize = 2k, blocksize = 128k, part_size = 28M #
-	@pushd $(IMAGES_DIR)/$(PUB_IMAGE); ./mkubiimg.sh $(CHIP) 2k 128k $(IMAGES_DIR)/$(PUB_DATAFS) 27M $(IMAGES_DIR)/bin/pc 0 datafs; popd
-	# build the pagesize = 4k, blocksize = 256k, part_size = 28M #
-	@pushd $(IMAGES_DIR)/$(PUB_IMAGE); ./mkubiimg.sh $(CHIP) 4k 256k $(IMAGES_DIR)/$(PUB_DATAFS) 27M $(IMAGES_DIR)/bin/pc 0 datafs; popd
+	# build the pagesize = 2k, blocksize = 128k, part_size = $(DATAFS_NAND_SIZE) #
+	@pushd $(IMAGES_DIR)/$(PUB_IMAGE); ./mkubiimg.sh $(CHIP) 2k 128k $(IMAGES_DIR)/$(PUB_DATAFS) $(DATAFS_NAND_SIZE) $(IMAGES_DIR)/bin/pc 0 datafs; popd
+	# build the pagesize = 4k, blocksize = 256k, part_size = $(DATAFS_NAND_SIZE) #
+	@pushd $(IMAGES_DIR)/$(PUB_IMAGE); ./mkubiimg.sh $(CHIP) 4k 256k $(IMAGES_DIR)/$(PUB_DATAFS) $(DATAFS_NAND_SIZE) $(IMAGES_DIR)/bin/pc 0 datafs; popd
 
 	@pushd $(IMAGES_DIR)/bin/pc; ./mkfs.jffs2 -d $(IMAGES_DIR)/$(PUB_DATAFS) -l -e 0x40000 -o $(IMAGES_DIR)/$(PUB_IMAGE)/$(DATAFS_JFFS2_IMAGE_BIN_256K); popd
 	@pushd $(IMAGES_DIR)/bin/pc; ./mkfs.jffs2 -d $(IMAGES_DIR)/$(PUB_DATAFS) -l -e 0x20000 -o $(IMAGES_DIR)/$(PUB_IMAGE)/$(DATAFS_JFFS2_IMAGE_BIN_128K); popd

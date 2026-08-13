@@ -7,7 +7,7 @@
   <Part Sel="1" PartitionName="rootfs" FlashType="nand" FileSystem="none" Start="11776K" Length="8M" SelectFile="rootfs_lq560plusv100.ramdisk.img"/>
   <Part Sel="1" PartitionName="upgrade" FlashType="nand" FileSystem="none" Start="19968K" Length="32M" SelectFile="upgrade.ubi"/>
   <Part Sel="1" PartitionName="userfs" FlashType="nand" FileSystem="none" Start="52736K" Length="32M" SelectFile="userfs_lq560plusv100_2k_128k_32M.ubifs"/>
-  <Part Sel="1" PartitionName="data" FlashType="nand" FileSystem="none" Start="85504K" Length="45568K" SelectFile="datafs_lq560plusv100_2k_128k_27M.ubifs"/>
+  <Part Sel="1" PartitionName="data" FlashType="nand" FileSystem="none" Start="85504K" Length="45568K" SelectFile="datafs_lq560plusv100_2k_128k_44M.ubifs"/>
   <Env>arch=arm
 baudrate=115200
 board=lq560plusv100
