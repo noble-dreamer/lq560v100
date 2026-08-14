@@ -2,8 +2,10 @@ $ErrorActionPreference = 'Stop'
 $rndisDir = $PSScriptRoot
 $usbEtherPath = Join-Path $rndisDir 'usb-ether.sh'
 $userInitPath = Join-Path $rndisDir 'user_init.sh'
+$upgradeTriggerPath = Join-Path $rndisDir 'upgrade_triggerd'
 $usbEther = [System.IO.File]::ReadAllText($usbEtherPath)
 $userInit = [System.IO.File]::ReadAllText($userInitPath)
+$upgradeTrigger = [System.IO.File]::ReadAllText($upgradeTriggerPath)
 $sb = [System.Text.StringBuilder]::new()
 
 function Add-RemoteScript {
@@ -26,14 +28,16 @@ function Add-RemoteScript {
     [void]$sb.AppendLine(('echo "{0}: $(wc -l < {0}) lines"' -f $RemotePath))
 }
 
-[void]$sb.AppendLine('echo "=== Pushing RNDIS + SSH + IMU boot scripts ==="')
+[void]$sb.AppendLine('echo "=== Pushing RNDIS + SSH + upgrade-trigger boot scripts ==="')
 [void]$sb.AppendLine('mkdir -p /opt/bin')
+[void]$sb.AppendLine('mkdir -p /data')
 [void]$sb.AppendLine('if [ -f /opt/user_init.sh ] && [ ! -f /opt/user_init.sh.pre_rndis_bak ]; then cp /opt/user_init.sh /opt/user_init.sh.pre_rndis_bak; fi')
 [void]$sb.AppendLine('if [ -f /opt/bin/usb-ether.sh ] && [ ! -f /opt/bin/usb-ether.sh.pre_rndis_bak ]; then cp /opt/bin/usb-ether.sh /opt/bin/usb-ether.sh.pre_rndis_bak; fi')
 Add-RemoteScript -Content $usbEther -RemotePath '/opt/bin/usb-ether.sh'
 Add-RemoteScript -Content $userInit -RemotePath '/opt/user_init.sh'
+Add-RemoteScript -Content $upgradeTrigger -RemotePath '/data/upgrade_triggerd'
 [void]$sb.AppendLine('echo "=== VERIFY ==="')
-[void]$sb.AppendLine('grep -n "run.sh\|getty\|imu_app" /opt/user_init.sh /opt/bin/usb-ether.sh')
+[void]$sb.AppendLine('grep -n "run.sh\|getty\|imu_app\|upgrade_triggerd" /opt/user_init.sh /opt/bin/usb-ether.sh /data/upgrade_triggerd')
 [void]$sb.AppendLine('echo "=== DONE: reboot only after the full OpenSSH bundle is deployed ==="')
 
 $outPath = Join-Path $rndisDir 'push_cmds.txt'

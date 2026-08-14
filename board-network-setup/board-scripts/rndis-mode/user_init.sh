@@ -5,8 +5,8 @@
 # Deploy to: /opt/user_init.sh (back up the current file first)
 #
 # Direct Windows <-> board SSH uses usb0 only.  No WSL/NFS return route is
-# installed here.  IMU_APP is intentionally disabled, so ttyGS0 remains the
-# USB ACM getty console used only for recovery/deployment before SSH is up.
+# installed here.  IMU_APP stays disabled.  ttyGS0 is reserved for the
+# COM-port upgrade trigger protocol (upgrade_triggerd), not a getty shell.
 # =============================================================================
 
 # --- Standard init ---
@@ -46,4 +46,4 @@ fi
 
 # Do not call /opt/stereo/run.sh in RNDIS mode: it builds the UVC camera
 # gadget and would attempt to bind the UDC already owned by ether.  Do not
-# start imu_app or upgrade_triggerd either; getty is started by usb-ether.sh.
+# start imu_app either; usb-ether.sh starts upgrade_triggerd (not getty).

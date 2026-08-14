@@ -1,5 +1,6 @@
-echo "=== Pushing RNDIS + SSH + IMU boot scripts ==="
+echo "=== Pushing RNDIS + SSH + upgrade-trigger boot scripts ==="
 mkdir -p /opt/bin
+mkdir -p /data
 if [ -f /opt/user_init.sh ] && [ ! -f /opt/user_init.sh.pre_rndis_bak ]; then cp /opt/user_init.sh /opt/user_init.sh.pre_rndis_bak; fi
 if [ -f /opt/bin/usb-ether.sh ] && [ ! -f /opt/bin/usb-ether.sh.pre_rndis_bak ]; then cp /opt/bin/usb-ether.sh /opt/bin/usb-ether.sh.pre_rndis_bak; fi
 : > /opt/bin/usb-ether.sh.new
@@ -84,9 +85,10 @@ printf '%s' 'ZWNobyAiJFVEQ19OQU1FIiA+IFVEQwo=' | base64 -d >> /opt/bin/usb-ether
 printf '%s' 'c2xlZXAgMC41Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
 printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
 printf '%s' 'aWZjb25maWcgdXNiMCAiJEJPQVJEX0lQIgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
-printf '%s' 'IyBJTVVfQVBQIGlzIGRpc2FibGVkIGluIHRoaXMgcHJvZmlsZS4gIEtlZXAgdHR5R1MwIGFzIGEgMS41IE1icHMgZ2V0dHkK' | base64 -d >> /opt/bin/usb-ether.sh.new
-printf '%s' 'IyBjb25zb2xlIGZvciByZWNvdmVyeTsgU1NIIGl0c2VsZiBydW5zIG92ZXIgUk5ESVMvdXNiMC4K' | base64 -d >> /opt/bin/usb-ether.sh.new
-printf '%s' 'cGlkb2YgZ2V0dHkgPi9kZXYvbnVsbCAyPiYxIHx8IHNldHNpZCBnZXR0eSAtTCAxNTAwMDAwIHR0eUdTMCB2dDEwMCAmCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyBJTVVfQVBQIHN0YXlzIGRpc2FibGVkLiAgdHR5R1MwIGlzIHJlc2VydmVkIGZvciB0aGUgQ09NLXBvcnQgdXBncmFkZSB0cmlnZ2VyCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyBwcm90b2NvbCAodXBncmFkZV90cmlnZ2VyZCksIE5PVCBhIGdldHR5IGxvZ2luIHNoZWxsLCBzbyB0aGUgbGVnYWN5IFBDCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'IyB1cGdyYWRlIHRvb2wga2VlcHMgd29ya2luZyBvdmVyIENPTTcuICBTU0ggaXRzZWxmIHJ1bnMgb3ZlciBSTkRJUy91c2IwLgo=' | base64 -d >> /opt/bin/usb-ether.sh.new
+printf '%s' 'cGlkb2YgdXBncmFkZV90cmlnZ2VyZCA+L2Rldi9udWxsIDI+JjEgfHwgL2RhdGEvdXBncmFkZV90cmlnZ2VyZCAmCg==' | base64 -d >> /opt/bin/usb-ether.sh.new
 printf '%s' 'Cg==' | base64 -d >> /opt/bin/usb-ether.sh.new
 sed -i "s/\r$//" /opt/bin/usb-ether.sh.new
 chmod +x /opt/bin/usb-ether.sh.new
@@ -100,8 +102,8 @@ printf '%s' 'Iwo=' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'IyBEZXBsb3kgdG86IC9vcHQvdXNlcl9pbml0LnNoIChiYWNrIHVwIHRoZSBjdXJyZW50IGZpbGUgZmlyc3QpCg==' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'Iwo=' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'IyBEaXJlY3QgV2luZG93cyA8LT4gYm9hcmQgU1NIIHVzZXMgdXNiMCBvbmx5LiAgTm8gV1NML05GUyByZXR1cm4gcm91dGUgaXMK' | base64 -d >> /opt/user_init.sh.new
-printf '%s' 'IyBpbnN0YWxsZWQgaGVyZS4gIElNVV9BUFAgaXMgaW50ZW50aW9uYWxseSBkaXNhYmxlZCwgc28gdHR5R1MwIHJlbWFpbnMgdGhlCg==' | base64 -d >> /opt/user_init.sh.new
-printf '%s' 'IyBVU0IgQUNNIGdldHR5IGNvbnNvbGUgdXNlZCBvbmx5IGZvciByZWNvdmVyeS9kZXBsb3ltZW50IGJlZm9yZSBTU0ggaXMgdXAuCg==' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBpbnN0YWxsZWQgaGVyZS4gIElNVV9BUFAgc3RheXMgZGlzYWJsZWQuICB0dHlHUzAgaXMgcmVzZXJ2ZWQgZm9yIHRoZQo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBDT00tcG9ydCB1cGdyYWRlIHRyaWdnZXIgcHJvdG9jb2wgKHVwZ3JhZGVfdHJpZ2dlcmQpLCBub3QgYSBnZXR0eSBzaGVsbC4K' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQo=' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'IyAtLS0gU3RhbmRhcmQgaW5pdCAtLS0K' | base64 -d >> /opt/user_init.sh.new
@@ -133,19 +135,79 @@ printf '%s' 'WyAteCAvZXRjL3VzYl9tb2RlX2N0bC5zaCBdICYmIC9ldGMvdXNiX21vZGVfY3RsLnN
 printf '%s' 'L29wdC9iaW4vdXNiLWV0aGVyLnNoCg==' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'KCBzbGVlcCA1OyBbIC16ICIkKGNhdCAvc3lzL2tlcm5lbC9jb25maWcvdXNiX2dhZGdldC9ldGhlci9VREMgMj4vZGV2L251bGwpIiBdICYmIC9vcHQvYmluL3VzYi1ldGhlci5zaCApICYK' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
-printf '%s' 'IyBTdGFydCBPcGVuU1NIIChhY2NvdW50IGZpeCArIHNzaGQpCg==' | base64 -d >> /opt/user_init.sh.new
-printf '%s' 'aWYgWyAteCAvZGF0YS9vcGVuc3NoL3N0YXJ0X3NzaGQuc2ggXTsgdGhlbgo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBTdGFydCBPcGVuU1NIIChGVFAgdXBsb2FkcyBhcnJpdmUgd2l0aG91dCBleGVjdXRhYmxlIHBlcm1pc3Npb24pLgo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'aWYgWyAtZiAvZGF0YS9vcGVuc3NoL3N0YXJ0X3NzaGQuc2ggXTsgdGhlbgo=' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'ICAgIGNobW9kICt4IC9kYXRhL29wZW5zc2gvc3RhcnRfc3NoZC5zaCAvZGF0YS9vcGVuc3NoL2Jpbi8qCg==' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'ICAgIC9kYXRhL29wZW5zc2gvc3RhcnRfc3NoZC5zaCAmCg==' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'ZmkK' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'IyBEbyBub3QgY2FsbCAvb3B0L3N0ZXJlby9ydW4uc2ggaW4gUk5ESVMgbW9kZTogaXQgYnVpbGRzIHRoZSBVVkMgY2FtZXJhCg==' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'IyBnYWRnZXQgYW5kIHdvdWxkIGF0dGVtcHQgdG8gYmluZCB0aGUgVURDIGFscmVhZHkgb3duZWQgYnkgZXRoZXIuICBEbyBub3QK' | base64 -d >> /opt/user_init.sh.new
-printf '%s' 'IyBzdGFydCBpbXVfYXBwIG9yIHVwZ3JhZGVfdHJpZ2dlcmQgZWl0aGVyOyBnZXR0eSBpcyBzdGFydGVkIGJ5IHVzYi1ldGhlci5zaC4K' | base64 -d >> /opt/user_init.sh.new
+printf '%s' 'IyBzdGFydCBpbXVfYXBwIGVpdGhlcjsgdXNiLWV0aGVyLnNoIHN0YXJ0cyB1cGdyYWRlX3RyaWdnZXJkIChub3QgZ2V0dHkpLgo=' | base64 -d >> /opt/user_init.sh.new
 printf '%s' 'Cg==' | base64 -d >> /opt/user_init.sh.new
 sed -i "s/\r$//" /opt/user_init.sh.new
 chmod +x /opt/user_init.sh.new
 if sh -n /opt/user_init.sh.new; then mv /opt/user_init.sh.new /opt/user_init.sh; else echo "ERROR: syntax check failed for /opt/user_init.sh"; fi
 echo "/opt/user_init.sh: $(wc -l < /opt/user_init.sh) lines"
+: > /data/upgrade_triggerd.new
+printf '%s' 'IyEvYmluL3NoCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyB1cGdyYWRlX3RyaWdnZXJkIC0gQ09NLXBvcnQgdHJpZ2dlciArIHZlcnNpb24gcXVlcnkgZm9yIFVTQiB1cGdyYWRlCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyBEZXBsb3kgdG86IC9kYXRhL3VwZ3JhZGVfdHJpZ2dlcmQgKFJORElTICsgU1NIIHByb2ZpbGUpCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'Iwo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyBQcm90b2NvbCAoc2FtZSBhcyAvZXRjL3VwZ3JhZGVfdHJpZ2dlcmQpOgo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyAgIFVQR1JBREU6NUFBNTVBQTUgIC0+IGVudGVyIFVTQiB1cGdyYWRlIG1vZGUgKFdpblVTQiB1c2JfcmVjZWl2ZXIpCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyAgIFZFUlNJT04/ICAgICAgICAgICAtPiByZXBseSB3aXRoIGN1cnJlbnQgZmlybXdhcmUgdmVyc2lvbiwgbm8gbW9kZSBzd2l0Y2gK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'Iwo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyBSTkRJUy1zcGVjaWZpYzogYmVmb3JlIGVudGVyaW5nIHVwZ3JhZGUgbW9kZSB0aGlzIHNjcmlwdCByZWxlYXNlcyB0aGUgZXRoZXIK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyBnYWRnZXQgVURDLCBiZWNhdXNlIC9ldGMvdXNiX21vZGVfY3RsLnNoIG9ubHkgdGVhcnMgZG93biB0aGUgY2FtZXJhIGdhZGdldAo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyBhbmQgd291bGQgb3RoZXJ3aXNlIGZhaWwgdG8gYmluZCB0aGUgdXBncmFkZSBnYWRnZXQgd2hpbGUgZXRoZXIgb3ducyB0aGUgVURDLgo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'Cg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'VFJJR0dFUj0vZXRjL3VzYl9tb2RlX2N0bC5zaAo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'VFRZPS9kZXYvdHR5R1MwCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'UElERklMRT0vdG1wL3VwZ3JhZGVfdHJpZ2dlcmQucGlkCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'VE9LRU49IiR7VVBHUkFERV9UT0tFTjotVVBHUkFERTo1QUE1NUFBNX0iCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'Cg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ZWNobyAkJCA+ICIkUElERklMRSIK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'dHJhcCAncm0gLWYgIiRQSURGSUxFIicgRVhJVCBJTlQgVEVSTQo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'Cg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'IyB0dHlHUzAgYXBwZWFycyBvbmNlIGFjbS51c2IwIGlzIGluc3RhbnRpYXRlZCBhbmQgY2FycmllcyBkYXRhIGFmdGVyIFVEQyBiaW5kLgo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'aT0wCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'd2hpbGUgWyAhIC1lICIkVFRZIiBdICYmIFsgIiRpIiAtbHQgMTAwIF07IGRvCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgIHNsZWVwIDAuMQo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgIGk9JCgoaSArIDEpKQo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ZG9uZQo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'WyAtZSAiJFRUWSIgXSB8fCBleGl0IDAK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'Cg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'c3R0eSAtRiAiJFRUWSIgLWVjaG8gMj4vZGV2L251bGwK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ZXhlYyAzPD4iJFRUWSIK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'Y3I9JChwcmludGYgJ1xyJykK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'Cg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'd2hpbGUgSUZTPSByZWFkIC1yIGxpbmUgPCYzOyBkbwo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgIGxpbmU9IiR7bGluZSUkY3J9Igo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgIGNhc2UgIiRsaW5lIiBpbgo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAiJFRPS0VOIikK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgIyBTdG9wIGFueSBsZWZ0b3ZlciBnZXR0eSBzbyBpdCBjYW5ub3QgY29tcGV0ZSBmb3IgdHR5R1MwIGlucHV0LAo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgIyByZWxlYXNlIHRoZSBSTkRJUyBldGhlciBVREMsIHRoZW4gc3dpdGNoIHRvIFdpblVTQiB1cGdyYWRlIG1vZGUuCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAga2lsbGFsbCBnZXR0eSAyPi9kZXYvbnVsbAo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgZWNobyAiIiA+IC9zeXMva2VybmVsL2NvbmZpZy91c2JfZ2FkZ2V0L2V0aGVyL1VEQyAyPi9kZXYvbnVsbAo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgc2xlZXAgMQo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgIiRUUklHR0VSIiB1cGdyYWRlID4vZGV2L251bGwgMj4mMSAmCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgZXhpdCAwCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgOzsK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAiVkVSU0lPTj8iKQo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgcmVhZCAtciB2ZXIgPC9ldGMvZnMtdmVyc2lvbiAyPi9kZXYvbnVsbAo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgcHJpbnRmICdWOiVzXG4nICIkdmVyIiA+JjMK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgICAgICAgICAgOzsK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ICAgIGVzYWMK' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ZG9uZQo=' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'ZXhpdCAwCg==' | base64 -d >> /data/upgrade_triggerd.new
+printf '%s' 'Cg==' | base64 -d >> /data/upgrade_triggerd.new
+sed -i "s/\r$//" /data/upgrade_triggerd.new
+chmod +x /data/upgrade_triggerd.new
+if sh -n /data/upgrade_triggerd.new; then mv /data/upgrade_triggerd.new /data/upgrade_triggerd; else echo "ERROR: syntax check failed for /data/upgrade_triggerd"; fi
+echo "/data/upgrade_triggerd: $(wc -l < /data/upgrade_triggerd) lines"
 echo "=== VERIFY ==="
-grep -n "run.sh\|getty\|imu_app" /opt/user_init.sh /opt/bin/usb-ether.sh
+grep -n "run.sh\|getty\|imu_app\|upgrade_triggerd" /opt/user_init.sh /opt/bin/usb-ether.sh /data/upgrade_triggerd
 echo "=== DONE: reboot only after the full OpenSSH bundle is deployed ==="

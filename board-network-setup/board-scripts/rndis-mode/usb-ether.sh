@@ -79,6 +79,7 @@ echo "$UDC_NAME" > UDC
 sleep 0.5
 
 ifconfig usb0 "$BOARD_IP"
-# IMU_APP is disabled in this profile.  Keep ttyGS0 as a 1.5 Mbps getty
-# console for recovery; SSH itself runs over RNDIS/usb0.
-pidof getty >/dev/null 2>&1 || setsid getty -L 1500000 ttyGS0 vt100 &
+# IMU_APP stays disabled.  ttyGS0 is reserved for the COM-port upgrade trigger
+# protocol (upgrade_triggerd), NOT a getty login shell, so the legacy PC
+# upgrade tool keeps working over COM7.  SSH itself runs over RNDIS/usb0.
+pidof upgrade_triggerd >/dev/null 2>&1 || /data/upgrade_triggerd &

@@ -1,0 +1,53 @@
+#!/bin/sh
+# =============================================================================
+# upgrade_triggerd - COM-port trigger + version query for USB upgrade
+# Deploy to: /data/upgrade_triggerd (RNDIS + SSH profile)
+#
+# Protocol (same as /etc/upgrade_triggerd):
+#   UPGRADE:5AA55AA5  -> enter USB upgrade mode (WinUSB usb_receiver)
+#   VERSION?           -> reply with current firmware version, no mode switch
+#
+# RNDIS-specific: before entering upgrade mode this script releases the ether
+# gadget UDC, because /etc/usb_mode_ctl.sh only tears down the camera gadget
+# and would otherwise fail to bind the upgrade gadget while ether owns the UDC.
+# =============================================================================
+
+TRIGGER=/etc/usb_mode_ctl.sh
+TTY=/dev/ttyGS0
+PIDFILE=/tmp/upgrade_triggerd.pid
+TOKEN="${UPGRADE_TOKEN:-UPGRADE:5AA55AA5}"
+
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT INT TERM
+
+# ttyGS0 appears once acm.usb0 is instantiated and carries data after UDC bind.
+i=0
+while [ ! -e "$TTY" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+[ -e "$TTY" ] || exit 0
+
+stty -F "$TTY" -echo 2>/dev/null
+exec 3<>"$TTY"
+cr=$(printf '\r')
+
+while IFS= read -r line <&3; do
+    line="${line%$cr}"
+    case "$line" in
+        "$TOKEN")
+            # Stop any leftover getty so it cannot compete for ttyGS0 input,
+            # release the RNDIS ether UDC, then switch to WinUSB upgrade mode.
+            killall getty 2>/dev/null
+            echo "" > /sys/kernel/config/usb_gadget/ether/UDC 2>/dev/null
+            sleep 1
+            "$TRIGGER" upgrade >/dev/null 2>&1 &
+            exit 0
+            ;;
+        "VERSION?")
+            read -r ver </etc/fs-version 2>/dev/null
+            printf 'V:%s\n' "$ver" >&3
+            ;;
+    esac
+done
+exit 0
