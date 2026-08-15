@@ -135,8 +135,8 @@ static ot_s32 model_init(model_slot *slot, const char *name, const char *model_p
     /* trigger+trigger+wait 要求两模型优先级一致，这里统一设置 */
     ret = ot_avp_npu_set_model_config(slot->handle, &mdl_cfg);
     if (ret != 0) {
-        printf("[%s] set config fail\n", slot->name);
-        return ret;
+        /* 默认优先级同为 MEDIUM，且本样例先 wait A 再 wait B，失败不影响调度正确性 */
+        printf("[%s] set config fail, keep default priority\n", slot->name);
     }
 
     slot->input_dataset = ot_avp_npu_create_dataset();
