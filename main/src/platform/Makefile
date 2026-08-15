@@ -593,8 +593,7 @@ rootfs_build: busybox mtd_utils_board gzip datafs_build
 	@pushd $(IMAGES_DIR)/$(PUB_ROOTFS); chmod 1777 tmp; popd
 	@pushd $(IMAGES_DIR)/$(PUB_ROOTFS); chmod 755 bin etc lib opt proc usr usr/bin usr/bin/crontab sbin sbin/arp usr/lib var; popd
 	@pushd $(IMAGES_DIR)/$(PUB_ROOTFS); chmod 750 boot etc/init.d etc/init.d/*; popd
-	@pushd $(IMAGES_DIR)/$(PUB_ROOTFS); chmod 750 etc/usb_mode_ctl.sh; popd
-	@pushd $(IMAGES_DIR)/$(PUB_ROOTFS); chmod 750 etc/upgrade_triggerd; popd
+	@pushd $(IMAGES_DIR)/$(PUB_ROOTFS); chmod 750 etc/usb_mode_ctl.sh etc/upgrade_triggerd etc/rndis_boot.sh etc/usb-ether.sh; popd
 	@pushd $(IMAGES_DIR)/$(PUB_ROOTFS); chmod 644 etc/group etc/inittab etc/mtab etc/passwd etc/profile etc/protocols etc/services etc/shadow root/.profile; popd
 	@pushd $(IMAGES_DIR)/$(PUB_ROOTFS); chmod 640 var/run/utmp; popd
 	@pushd $(IMAGES_DIR)/$(PUB_ROOTFS); chmod 550 bin/mount bin/netstat sbin/route; popd
@@ -891,6 +890,10 @@ datafs_build: prepare mtd_utils_pc
 	@rm -rf $(IMAGES_DIR)/$(PUB_DATAFS)/*
 	@$(call copy_if_not_empty, $(MAIN_OUT_DIR)/data, $(IMAGES_DIR)/$(PUB_DATAFS))
 	@$(call copy_if_not_empty, ${OSDRV_DIR}/fs/datafs/datafs, $(IMAGES_DIR)/$(PUB_DATAFS))
+	## Ship OpenSSH in datafs so a full burn boots with SSH without serial
+	## provisioning. /data persists across OTA, so sshd config/host keys survive.
+	@cp -rf $(MAIN_DIR)/../board-network-setup/openssh $(IMAGES_DIR)/$(PUB_DATAFS)/
+	@rm -f $(IMAGES_DIR)/$(PUB_DATAFS)/openssh/etc/ssh/ssh_host_*_key*
 
 ifeq ($(BOOT_MEDIA),emmc)
 	@dd if=/dev/zero of=$(IMAGES_DIR)/$(PUB_IMAGE)/$(DATAFS_EXT4_IMAGE_BIN) bs=512 count=$(DATAFS_COUNT_SIZE)

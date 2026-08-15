@@ -185,7 +185,19 @@ if [ "$grow_data" = "1" ] && grep -q " /data " /proc/mounts 2>/dev/null; then
     touch /opt/.data_grown
 fi
 
-if [ -e $user_mount_dir/user_init.sh ];then
-    cd $user_mount_dir/
-    ./user_init.sh
+if [ -f /opt/.uvc_mode ]; then
+    # Opt-in legacy UVC camera boot (create /opt/.uvc_mode, then reboot).
+    if [ -e $user_mount_dir/user_init.sh ];then
+        cd $user_mount_dir/
+        ./user_init.sh
+    fi
+elif [ -x /etc/rndis_boot.sh ]; then
+    # Default product boot: RNDIS + SSH + COM upgrade trigger.
+    /etc/rndis_boot.sh
+else
+    # Fallback for images without the RNDIS boot script.
+    if [ -e $user_mount_dir/user_init.sh ];then
+        cd $user_mount_dir/
+        ./user_init.sh
+    fi
 fi
