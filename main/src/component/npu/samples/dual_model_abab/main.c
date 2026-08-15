@@ -345,11 +345,11 @@ int main(int argc, char **argv)
 
     ret = model_init(&models[0], "A", model_a);
     if (ret != 0) {
-        goto npu_out;
+        goto cleanup_models;
     }
     ret = model_init(&models[1], "B", model_b);
     if (ret != 0) {
-        goto npu_out;
+        goto cleanup_models;
     }
 
     mkdir_dir((char *)output_dir);
@@ -404,10 +404,10 @@ int main(int argc, char **argv)
         }
     }
 
+cleanup_models:
     model_destroy(&models[1]);
     model_destroy(&models[0]);
 
-npu_out:
     ot_avp_npu_deinit();
 smr_out:
 #ifndef SIMULATOR
