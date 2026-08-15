@@ -4,6 +4,7 @@ TARGET += "mobilenetv2_rgbplanar"
 TARGET += "resnet50_binary"
 TARGET += "custom_abs"
 TARGET += "sample_api_user_guide"
+TARGET += "dual_model_abab"
 
 $(warning echo "TARGET: $(TARGET)")
 TARGET_CLEAN = $(addsuffix _clean,$(TARGET))
