@@ -170,6 +170,7 @@ void transfer_header_decode(const uint8_t in[TRANSFER_HEADER_SIZE],
 int transfer_read_full(int fd, void *buf, size_t len, int timeout_ms);
 int transfer_write_full(int fd, const void *buf, size_t len);
 int transfer_read_header(transfer_ctx *ctx, int timeout_ms, transfer_header *h);
+uint64_t transfer_now_us(void);
 
 int transfer_init(transfer_ctx *ctx, int fd_in, int fd_out);
 

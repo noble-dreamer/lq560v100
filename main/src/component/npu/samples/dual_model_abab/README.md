@@ -140,7 +140,7 @@ board_out/*_frame*.bin    stream=2 时的原始 tensor（与落盘模式同名�
 
 ### 数据同步与协议
 
-每帧固定 32 字节头：`magic("NPST") | version | flags | type | model_id | seq | timestamp_us | orig_len | payload_len | crc32`。`seq` 为 frame 序号、`model_id` 区分 A/B，主机据此重组成帧；流首的 SYNC 帧携带协议版本、模型名/类型和总帧数，流中若混入日志行，接收端按 magic 自动重同步；每帧 payload 带 CRC32（与 `binascii.crc32` 同实现），压缩帧置 `flags.compressed` 后由主机 zlib 解压。
+每帧固定 32 字节头：`magic("NPST") | version | flags | type | model_id | seq | timestamp_us | orig_len | payload_len | crc32`。`seq` 为 frame 序号、`model_id` 区分 A/B，主机据此重组成帧；流首的 SYNC 帧携带协议版本、模型名/类型和总帧数，流中若混入日志行，接收端按 magic 自动重同步；每帧 payload 带 CRC32（与 `binascii.crc32` 同实现），压缩帧置 `flags.compressed` 后由主机 zlib 解压。RESULT 帧的 payload 以 `kind | count | duration_us` 开头：`timestamp_us` 是发送时刻的板端墙上时钟，`duration_us` 是本帧从循环开始到该模型结果发出所耗的时间，主机端 `results.jsonl` 会同时给出 `duration_ms`。
 
 ### 为什么推荐 SSH 而不是虚拟 USB
 

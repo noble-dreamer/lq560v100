@@ -36,7 +36,7 @@
 #define STREAM_KIND_CLASSIFY (1u)
 #define STREAM_KIND_DETECT   (2u)
 #define STREAM_SYNC_SIZE     (48u)
-#define STREAM_RESULT_HEAD   (8u)
+#define STREAM_RESULT_HEAD   (16u)  /* kind + pad + count u32 + duration_us u64 */
 #define STREAM_TENSOR_HEAD   (40u)
 
 #define DEFAULT_MODEL_A  "../data/model/classification/resnet50_binary_b.ortm"
@@ -477,19 +477,19 @@ static ot_s32 stream_send_sync(transfer_ctx *tx, const model_slot *a, const mode
     return transfer_send(tx, TRANSFER_TYPE_SYNC, 0, 0, payload, sizeof(payload), false);
 }
 
-/* 分类结果载荷：kind=1 + count + (idx u32, score f32) x count。 */
+/* 分类结果载荷：kind=1 + count + duration_us + (idx u32, score f32) x count。
+ * duration_us 为从本帧循环开始到这条结果发出的耗时。 */
 static ot_s32 stream_send_classify_result(transfer_ctx *tx, const model_slot *slot,
-                                          ot_u32 seq, const ot_u32 idx[TOP_K],
-                                          const float val[TOP_K])
+                                          ot_u32 seq, ot_u64 frame_start_us,
+                                          const ot_u32 idx[TOP_K], const float val[TOP_K])
 {
     uint8_t payload[STREAM_RESULT_HEAD + TOP_K * 8];
-    size_t off = 0;
+    size_t off = STREAM_RESULT_HEAD;
     ot_u32 k;
 
-    transfer_put_u8(payload + off, STREAM_KIND_CLASSIFY);
-    off += 4;
-    transfer_put_u32(payload + off, TOP_K);
-    off += 4;
+    transfer_put_u8(payload, STREAM_KIND_CLASSIFY);
+    transfer_put_u32(payload + 4, TOP_K);
+    transfer_put_u64(payload + 8, transfer_now_us() - frame_start_us);
     for (k = 0; k < TOP_K; k++) {
         transfer_put_u32(payload + off, idx[k]);
         transfer_put_f32(payload + off + 4, val[k]);
@@ -501,7 +501,7 @@ static ot_s32 stream_send_classify_result(transfer_ctx *tx, const model_slot *sl
 
 static ot_s32 classification_postprocess(model_slot *slot, const char *output_dir,
                                          ot_u32 frame, bool save, transfer_ctx *tx,
-                                         ot_u32 seq)
+                                         ot_u32 seq, ot_u64 frame_start_us)
 {
     ot_u32 i;
 
@@ -510,7 +510,7 @@ static ot_s32 classification_postprocess(model_slot *slot, const char *output_di
         float val[TOP_K];
 
         if (compute_topk(&slot->outputs[0], idx, val)) {
-            return stream_send_classify_result(tx, slot, seq, idx, val);
+            return stream_send_classify_result(tx, slot, seq, frame_start_us, idx, val);
         }
         return 0;
     }
@@ -550,9 +550,11 @@ typedef struct {
     bool suppressed;
 } yolo_box;
 
-/* 检测结果载荷：kind=2 + count + (x1,y1,x2,y2,score f32 + class_id u32) x count。 */
+/* 检测结果载荷：kind=2 + count + duration_us + (x1,y1,x2,y2,score f32 +
+ * class_id u32) x count。duration_us 为从本帧循环开始到这条结果发出的耗时。 */
 static ot_s32 stream_send_detect_result(transfer_ctx *tx, const model_slot *slot,
-                                        ot_u32 seq, const yolo_box *boxes, ot_u32 box_num)
+                                        ot_u32 seq, ot_u64 frame_start_us,
+                                        const yolo_box *boxes, ot_u32 box_num)
 {
     uint8_t *payload;
     size_t off = STREAM_RESULT_HEAD;
@@ -571,6 +573,7 @@ static ot_s32 stream_send_detect_result(transfer_ctx *tx, const model_slot *slot
     }
     transfer_put_u8(payload, STREAM_KIND_DETECT);
     transfer_put_u32(payload + 4, kept);
+    transfer_put_u64(payload + 8, transfer_now_us() - frame_start_us);
     for (o = 0; o < box_num; o++) {
         const yolo_box *b = &boxes[o];
 
@@ -801,7 +804,7 @@ static float yolo_iou(const yolo_box *a, const yolo_box *b)
 /* tiny-yolov3：两路 NHWC [1,H,W,255] 输出做置信度阈值过滤 + NMS */
 static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *output_dir,
                                               ot_u32 frame, bool save, transfer_ctx *tx,
-                                              ot_u32 seq)
+                                              ot_u32 seq, ot_u64 frame_start_us)
 {
     static const ot_s32 masks[YOLO_OUTPUT_NUM][YOLO_ANCHOR_NUM] = {
         {0, 1, 2}, {3, 4, 5},
@@ -862,7 +865,8 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
         ot_s32 sret = 0;
 
         if (tx != NULL) {
-            sret = stream_send_detect_result(tx, slot, seq, boxes, box_num);
+            sret = stream_send_detect_result(tx, slot, seq, frame_start_us, boxes,
+                                             box_num);
         }
         free(boxes);
         return sret;
@@ -887,12 +891,15 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
 }
 
 static ot_s32 model_postprocess(model_slot *slot, const char *output_dir, ot_u32 frame,
-                                bool save, transfer_ctx *tx, ot_u32 seq)
+                                bool save, transfer_ctx *tx, ot_u32 seq,
+                                ot_u64 frame_start_us)
 {
     if (slot->kind == MODEL_KIND_DETECT_YOLOV3) {
-        return tiny_yolov3_yuv420sp_postprocess(slot, output_dir, frame, save, tx, seq);
+        return tiny_yolov3_yuv420sp_postprocess(slot, output_dir, frame, save, tx, seq,
+                                               frame_start_us);
     }
-    return classification_postprocess(slot, output_dir, frame, save, tx, seq);
+    return classification_postprocess(slot, output_dir, frame, save, tx, seq,
+                                      frame_start_us);
 }
 
 int main(int argc, char **argv)
@@ -973,6 +980,8 @@ int main(int argc, char **argv)
     }
 
     for (frame = 0; frame < repeat; frame++) {
+        ot_u64 frame_start_us = transfer_now_us();
+
         if (!stream_mode) {
             printf("\n===== frame %u =====\n", frame);
         }
@@ -1008,7 +1017,7 @@ int main(int argc, char **argv)
             break;
         }
         ret = model_postprocess(&models[0], output_dir, frame, save_output,
-                                stream_mode ? &tx : NULL, frame);
+                                stream_mode ? &tx : NULL, frame, frame_start_us);
         if (ret != 0) {
             break;
         }
@@ -1020,7 +1029,7 @@ int main(int argc, char **argv)
             break;
         }
         ret = model_postprocess(&models[1], output_dir, frame, save_output,
-                                stream_mode ? &tx : NULL, frame);
+                                stream_mode ? &tx : NULL, frame, frame_start_us);
         if (ret != 0) {
             break;
         }

@@ -13,7 +13,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-static uint64_t now_us(void)
+uint64_t transfer_now_us(void)
 {
     struct timeval tv;
 
@@ -98,7 +98,7 @@ int transfer_send(transfer_ctx *ctx, uint8_t type, uint8_t model_id, uint32_t se
     h.seq = seq;
     if (ctx->has_timestamp) {
         h.flags |= TRANSFER_FLAG_HAS_TIMESTAMP;
-        h.timestamp_us = now_us();
+        h.timestamp_us = transfer_now_us();
     }
     h.orig_len = (uint32_t)payload_len;
     h.payload_len = (uint32_t)wire_len;
