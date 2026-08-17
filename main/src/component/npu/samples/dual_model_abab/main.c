@@ -465,6 +465,7 @@ typedef struct {
     float y2;
     float score;
     ot_u32 class_id;
+    bool suppressed;
 } yolo_box;
 
 static float yolo_sigmoid(float x)
@@ -548,7 +549,39 @@ static ot_u32 yolo_decode_output(const float *out, ot_s32 grid_h, ot_s32 grid_w,
     return count;
 }
 
-/* tiny-yolov3：两路 NHWC [1,H,W,255] 输出做置信度阈值过滤，得到候选框 */
+static int yolo_score_desc(const void *lhs, const void *rhs)
+{
+    const yolo_box *a = (const yolo_box *)lhs;
+    const yolo_box *b = (const yolo_box *)rhs;
+
+    if (a->score > b->score) {
+        return -1;
+    }
+    if (a->score < b->score) {
+        return 1;
+    }
+    return 0;
+}
+
+static float yolo_iou(const yolo_box *a, const yolo_box *b)
+{
+    float ix1 = a->x1 > b->x1 ? a->x1 : b->x1;
+    float iy1 = a->y1 > b->y1 ? a->y1 : b->y1;
+    float ix2 = a->x2 < b->x2 ? a->x2 : b->x2;
+    float iy2 = a->y2 < b->y2 ? a->y2 : b->y2;
+    float iw = ix2 - ix1;
+    float ih = iy2 - iy1;
+    float inter;
+
+    if (iw <= 0.0f || ih <= 0.0f) {
+        return 0.0f;
+    }
+    inter = iw * ih;
+    return inter / ((a->x2 - a->x1) * (a->y2 - a->y1) +
+                    (b->x2 - b->x1) * (b->y2 - b->y1) - inter + 1e-9f);
+}
+
+/* tiny-yolov3：两路 NHWC [1,H,W,255] 输出做置信度阈值过滤 + NMS */
 static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *output_dir,
                                               ot_u32 frame, bool save)
 {
@@ -557,6 +590,7 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
     };
     yolo_box *boxes;
     ot_u32 box_num = 0;
+    ot_u32 kept = 0;
     ot_s32 o;
 
     if (!save) {
@@ -613,13 +647,34 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
         }
     }
 
-    printf("[%s] frame[%u] candidates after threshold: %u\n",
-           slot->name, frame, box_num);
+    qsort(boxes, box_num, sizeof(yolo_box), yolo_score_desc);
     for (o = 0; o < (ot_s32)box_num; o++) {
-        printf("  class=%u score=%.3f box=(%.1f,%.1f)-(%.1f,%.1f)\n",
+        ot_u32 j;
+
+        if (boxes[o].suppressed) {
+            continue;
+        }
+        for (j = o + 1; j < box_num; j++) {
+            if (!boxes[j].suppressed && yolo_iou(&boxes[o], &boxes[j]) > YOLO_NMS_THRESH) {
+                boxes[j].suppressed = true;
+            }
+        }
+    }
+
+    printf("[%s] frame[%u] detections after threshold+NMS:", slot->name, frame);
+    for (o = 0; o < (ot_s32)box_num; o++) {
+        if (boxes[o].suppressed) {
+            continue;
+        }
+        printf("\n  class=%u score=%.3f box=(%.1f,%.1f)-(%.1f,%.1f)",
                boxes[o].class_id, boxes[o].score, boxes[o].x1, boxes[o].y1,
                boxes[o].x2, boxes[o].y2);
+        kept++;
     }
+    if (kept == 0) {
+        printf(" none");
+    }
+    printf("\n");
     free(boxes);
     return 0;
 }
