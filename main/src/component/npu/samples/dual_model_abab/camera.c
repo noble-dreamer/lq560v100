@@ -17,9 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <time.h>
 #include <unistd.h>
 #include "ot_scene.h"
 #include "ot_scenecomm.h"
+#include "ot_smr.h"
 
 #define CAMERA_SNS_TYPE   SMS_SC132GS_MIPI_1_5M_30FPS_RAW12_DIRECT_SLAVE
 #define CAMERA_PIPE_NUM   4
@@ -48,6 +50,7 @@ typedef struct {
     ot_bool           get_run;
     pthread_t         get_tid;
     pthread_mutex_t   lock;
+    pthread_cond_t    cond;
     ot_bool           slot_valid;
     ot_eis_img_frame  slot_frame;
     ot_u32            det_frames;
@@ -225,6 +228,7 @@ int32_t camera_init(void)
     }
 
     pthread_mutex_init(&gs_ctx.lock, NULL);
+    pthread_cond_init(&gs_ctx.cond, NULL);
     gs_sys_init = OT_TRUE;
     printf("[camera] media system init ok\n");
     return OT_SUCCESS;
@@ -239,6 +243,7 @@ void camera_deinit(void)
     sample_comm_media_pipe_stop(gs_media_pipe_hdl);
     sample_comm_sys_exit();
     gs_sys_init = OT_FALSE;
+    pthread_cond_destroy(&gs_ctx.cond);
     pthread_mutex_destroy(&gs_ctx.lock);
     printf("[camera] media system exit ok\n");
 }
@@ -519,6 +524,7 @@ static void *camera_get_frame_proc(void *p)
             ctx->slot_valid = OT_TRUE;
             ctx->det_frames++;
             pthread_mutex_unlock(&ctx->lock);
+            pthread_cond_broadcast(&ctx->cond);
         }
     }
 
@@ -546,10 +552,14 @@ static void camera_fill_rows(uint8_t *dst, uint32_t dst_stride, uint32_t rows,
 
 int32_t camera_copy_latest_to_input(uint8_t *dst, uint32_t dst_len)
 {
-    const uint8_t *y;
-    const uint8_t *uv;
+    const uint8_t *y = NULL;
+    const uint8_t *uv = NULL;
+    ot_void *map = NULL;
+    uint32_t map_size = 0;
+    ot_u64 c_off;
     uint32_t top_pad = CAMERA_TOP_PAD;
     uint32_t y_size = CAMERA_NPU_IN_W * CAMERA_NPU_IN_H;
+    struct timespec ts;
     int32_t ret = -1;
 
     if (dst == NULL || dst_len < CAMERA_NPU_IN_LEN) {
@@ -557,13 +567,31 @@ int32_t camera_copy_latest_to_input(uint8_t *dst, uint32_t dst_len)
     }
 
     pthread_mutex_lock(&gs_ctx.lock);
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 1;
+    while (gs_ctx.slot_valid != OT_TRUE) {
+        if (pthread_cond_timedwait(&gs_ctx.cond, &gs_ctx.lock, &ts) != 0) {
+            goto unlock_out;
+        }
+    }
     if (gs_ctx.slot_valid != OT_TRUE ||
         gs_ctx.slot_frame.attr.width != CAMERA_DET_OUT_W ||
         gs_ctx.slot_frame.attr.height != CAMERA_DET_OUT_H) {
         goto unlock_out;
     }
-    y = (const uint8_t *)gs_ctx.slot_frame.buff.virt_addr[0];
-    uv = (const uint8_t *)gs_ctx.slot_frame.buff.virt_addr[1];
+    map_size = gs_ctx.slot_frame.buff.stride[0] * gs_ctx.slot_frame.attr.height +
+               gs_ctx.slot_frame.buff.stride[1] * gs_ctx.slot_frame.attr.height / 2;
+    c_off = gs_ctx.slot_frame.buff.phys_addr[1] - gs_ctx.slot_frame.buff.phys_addr[0];
+    if (c_off >= map_size) {
+        goto unlock_out;
+    }
+    /* USER 模式帧的 virt_addr 不可靠，按 uvc_app 的方式映射物理地址 */
+    if (ot_smr_mmap(gs_ctx.slot_frame.buff.phys_addr[0], map_size, OT_TRUE, &map) !=
+        OT_SUCCESS) {
+        goto unlock_out;
+    }
+    y = (const uint8_t *)map;
+    uv = y + c_off;
 
     camera_fill_rows(dst, CAMERA_NPU_IN_W, top_pad, NULL, 0, 128);
     camera_fill_rows(dst + (size_t)top_pad * CAMERA_NPU_IN_W, CAMERA_NPU_IN_W,
@@ -579,6 +607,9 @@ int32_t camera_copy_latest_to_input(uint8_t *dst, uint32_t dst_len)
                      CAMERA_NPU_IN_W, CAMERA_NPU_IN_W, top_pad / 2, NULL, 0, 128);
     ret = 0;
 
+    if (map != NULL) {
+        ot_smr_munmap(map, map_size);
+    }
 unlock_out:
     pthread_mutex_unlock(&gs_ctx.lock);
     return ret;
