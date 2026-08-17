@@ -111,3 +111,191 @@ export LD_LIBRARY_PATH=/data/npu_demo/lib:$LD_LIBRARY_PATH
 ```
 
 不传最后的 `output_dir`，即性能模式：只做预处理 → A/B 交替推理，不落盘、不打印 top-k。
+
+## 资源瓶颈评估
+
+大循环压测时除了延迟，还要同时记录整体 CPU、系统内存和样例进程 CPU，用于判断瓶颈在 CPU 还是内存。下面三个监控脚本和末尾的一键执行脚本均取自仓库根目录 `流程.txt`，仅把进程名从 `ortm_run_model` 改为 `sample_dual_model_abab`。
+
+在板端先创建脚本目录：
+
+```sh
+mkdir -p /data/npu_demo/scripts /data/npu_demo/logs
+```
+
+### 6.1 整机 CPU 占用监控 `/data/npu_demo/scripts/cpu_usage.sh`
+
+```sh
+#!/bin/sh
+
+LOG=/data/npu_demo/logs/cpu_usage.csv
+mkdir -p /data/npu_demo/logs
+
+prev_total=0
+prev_idle=0
+
+echo "timestamp,cpu_usage_percent" > $LOG
+
+while true; do
+    read -r _ user nice system idle iowait irq softirq steal rest < /proc/stat
+
+    total=$((user+nice+system+idle+iowait+irq+softirq+steal))
+    idle_all=$((idle+iowait))
+
+    if [ "$prev_total" -gt 0 ]; then
+        dt=$((total-prev_total))
+        di=$((idle_all-prev_idle))
+
+        if [ "$dt" -gt 0 ]; then
+            usage=$((100*(dt-di)/dt))
+        else
+            usage=0
+        fi
+
+        echo "$(date +%s),$usage" >> $LOG
+    fi
+
+    prev_total=$total
+    prev_idle=$idle_all
+
+    sleep 1
+done
+```
+
+### 6.2 内存监控 `/data/npu_demo/scripts/mem_monitor.sh`
+
+```sh
+#!/bin/sh
+
+LOG=/data/npu_demo/logs/mem_usage.csv
+mkdir -p /data/npu_demo/logs
+
+PID=$(pidof sample_dual_model_abab 2>/dev/null)
+if [ -z "$PID" ]; then
+    PID=$(ps | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
+fi
+
+while [ -z "$PID" ]; do
+    sleep 1
+    PID=$(pidof sample_dual_model_abab 2>/dev/null)
+    if [ -z "$PID" ]; then
+        PID=$(ps | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
+    fi
+done
+
+echo "monitor sample_dual_model_abab PID=$PID"
+echo "timestamp,mem_total_kb,mem_free_kb,mem_available_kb,pid_rss_kb" > $LOG
+
+while [ -d /proc/$PID ]; do
+    total=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+    free=$(awk '/MemFree/{print $2}' /proc/meminfo)
+    avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+    rss=$(awk '/VmRSS/{print $2}' /proc/$PID/status 2>/dev/null)
+
+    echo "$(date +%s),$total,$free,$avail,$rss" >> $LOG
+
+    sleep 1
+done
+
+echo "sample_dual_model_abab process finished"
+```
+
+### 6.3 样例进程 CPU 监控 `/data/npu_demo/scripts/proc_cpu.sh`
+
+```sh
+#!/bin/sh
+
+LOG=/data/npu_demo/logs/proc_cpu.csv
+mkdir -p /data/npu_demo/logs
+
+PID=$(pidof sample_dual_model_abab 2>/dev/null)
+if [ -z "$PID" ]; then
+    PID=$(ps | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
+fi
+
+while [ -z "$PID" ]; do
+    sleep 1
+    PID=$(pidof sample_dual_model_abab 2>/dev/null)
+    if [ -z "$PID" ]; then
+        PID=$(ps | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
+    fi
+done
+
+echo "monitor sample_dual_model_abab PID=$PID"
+
+HZ=$(getconf CLK_TCK 2>/dev/null)
+if [ -z "$HZ" ]; then
+    HZ=100
+fi
+
+prev=0
+
+echo "timestamp,pid,process_cpu_percent_approx" > $LOG
+
+while [ -d /proc/$PID ]; do
+    u1=$(awk '{print $14}' /proc/$PID/stat 2>/dev/null)
+    s1=$(awk '{print $15}' /proc/$PID/stat 2>/dev/null)
+
+    sleep 1
+
+    u2=$(awk '{print $14}' /proc/$PID/stat 2>/dev/null)
+    s2=$(awk '{print $15}' /proc/$PID/stat 2>/dev/null)
+
+    if [ -z "$u2" ] || [ -z "$s2" ]; then
+        break
+    fi
+
+    cur=$((u2+s2))
+    if [ "$prev" -gt 0 ]; then
+        delta=$((cur-prev))
+        cpu=$((delta*100/HZ))
+        echo "$(date +%s),$PID,$cpu" >> $LOG
+    fi
+    prev=$cur
+done
+
+echo "sample_dual_model_abab process finished"
+```
+
+三个脚本都赋可执行权限：
+
+```sh
+chmod +x /data/npu_demo/scripts/*.sh
+```
+
+### 七、一键执行：资源监控 + 10000 次 ABAB 推理
+
+```sh
+cd /data/npu_demo
+
+if [ -d /data/npu_demo/lib ]; then
+    export LD_LIBRARY_PATH=/data/npu_demo/lib:$LD_LIBRARY_PATH
+fi
+
+mkdir -p logs
+
+./scripts/cpu_usage.sh > logs/cpu_usage_console.log 2>&1 &
+CPU_MON=$!
+./scripts/mem_monitor.sh > logs/mem_console.log 2>&1 &
+MEM_MON=$!
+./scripts/proc_cpu.sh > logs/proc_cpu_console.log 2>&1 &
+PROC_MON=$!
+
+echo "CPU_MON PID: $CPU_MON"
+echo "MEM_MON PID: $MEM_MON"
+echo "PROC_MON PID: $PROC_MON"
+
+sleep 1
+
+./bin/sample_dual_model_abab \
+  /data/npu_demo/model/mobilenetv2_rgbplanar_b.ortm \
+  /data/npu_demo/input/ILSVRC2012_val_00024327.rgb \
+  /data/npu_demo/model/tiny-yolov3_yuv420sp_b.ortm \
+  /data/npu_demo/input/COCO_val2014_000000568213.yuv420sp \
+  10000 | tee /data/npu_demo/logs/abab.log
+
+kill $CPU_MON $MEM_MON $PROC_MON 2>/dev/null
+
+echo "benchmark finished"
+```
+
+结果落在 `/data/npu_demo/logs/`：`cpu_usage.csv` 是整机 CPU，`mem_usage.csv` 是内存与进程 RSS，`proc_cpu.csv` 是样例进程 CPU，`abab.log` 是程序运行日志。测试时注意 `/data` 分区剩余空间（`df -h /data`）；性能模式不写输出文件，10000 次循环只消耗日志空间。
