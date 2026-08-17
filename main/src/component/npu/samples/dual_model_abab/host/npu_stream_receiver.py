@@ -128,6 +128,8 @@ def main():
                         help="host output directory (default: npu_stream_out)")
     parser.add_argument("--no-tensors", action="store_true",
                         help="do not write tensor payloads to disk")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="suppress per-result stdout lines (for benchmarks)")
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -170,10 +172,10 @@ def main():
                 record = {"seq": seq, "model": model_name, "kind": kind_name,
                           "data": entries, "ts_us": ts_us}
                 results.write(json.dumps(record) + "\n")
-                if kind_name == "classify" and entries:
+                if not args.quiet and kind_name == "classify" and entries:
                     top = ", ".join("%d(%.4f)" % (idx, score) for idx, score in entries)
                     print("[%s] frame %d top-k: %s" % (model_name, seq, top))
-                elif kind_name == "detect":
+                elif not args.quiet and kind_name == "detect":
                     print("[%s] frame %d detections: %d"
                           % (model_name, seq, len(entries)))
                 continue
