@@ -182,7 +182,7 @@ export LD_LIBRARY_PATH=/data/npu_demo/lib:$LD_LIBRARY_PATH
 
 ## 资源瓶颈评估
 
-大循环压测时除了延迟，还要同时记录整体 CPU、系统内存和样例进程 CPU，用于判断瓶颈在 CPU 还是内存。下面三个监控脚本和末尾的一键执行脚本均取自仓库根目录 `流程.txt`，仅把进程名从 `ortm_run_model` 改为 `sample_dual_model_abab`。
+大循环压测时除了延迟，还要同时记录整体 CPU、系统内存和样例进程 CPU，用于判断瓶颈在 CPU 还是内存。下面三个监控脚本取自仓库根目录 `流程.txt`，仅把进程名从 `ortm_run_model` 改为 `sample_dual_model_abab`。两档评估分别对应「预处理 + 后处理」（性能模式，见第七节）和「预处理 + 后处理 + 流式传输」（stream=1，见第八节）。
 
 在板端先创建脚本目录：
 
@@ -324,7 +324,9 @@ echo "sample_dual_model_abab process finished"
 chmod +x /data/npu_demo/scripts/*.sh
 ```
 
-### 七、一键执行：资源监控 + 10000 次 ABAB 推理
+### 七、评估 1：预处理 + 后处理（性能模式，10000 次）
+
+在板端一键执行：资源监控 + 10000 次 ABAB 推理。性能模式不做流式传输、不落盘、不打印 top-k/检测框，但预处理和检测解码+NMS 仍完整执行，测的是真实 CPU 开销。
 
 ```sh
 cd /data/npu_demo
@@ -360,4 +362,77 @@ kill $CPU_MON $MEM_MON $PROC_MON 2>/dev/null
 echo "benchmark finished"
 ```
 
+跑完后用下面三条命令汇总（`avg` 为均值，`max` 为峰值）：
+
+```sh
+cd /data/npu_demo
+awk -F, 'NR>1{s+=$2;n++} END{if(n) printf "whole-CPU avg=%.1f%% n=%d\n",s/n,n; else print "whole-CPU: no samples"}' logs/cpu_usage.log
+awk -F, 'NR>1{s+=$5;n++} END{if(n) printf "RSS avg=%.0fKB n=%d\n",s/n,n; else print "RSS: no samples"}' logs/mem_usage.log
+awk -F, 'NR>1{s+=$3;n++} END{if(n) printf "proc-CPU avg=%.1f%% n=%d\n",s/n,n; else print "proc-CPU: no samples (run too short, needs >=3s)"}' logs/proc_cpu.log
+```
+
 结果落在 `/data/npu_demo/logs/`：`cpu_usage.log` 是整机 CPU，`mem_usage.log` 是内存与进程 RSS，`proc_cpu.log` 是样例进程 CPU，`abab.log` 是程序运行日志。每个监控脚本把同样的采样行同时写入自己的 `.log` 文件和 `*_console.log`，两个文件都不会为空。测试时注意 `/data` 分区剩余空间（`df -h /data`）；性能模式不写输出文件，10000 次循环只消耗日志空间。
+
+板端实测参考（mobilenetv2_rgbplanar + tiny-yolov3_yuv420sp，10000 帧）：约 64s；进程 CPU 平均约单核 38%；RSS 稳定约 4.5MB。
+
+### 八、评估 2：预处理 + 后处理 + 流式传输（stream=1，10000 次）
+
+这一档在**主机端**跑：推理结果经 SSH 流回主机，板端不落盘，主机接收器同时校验接收质量。把下面脚本存成文件（例如 `host/benchmark_stream.sh`）在样例目录运行，按需改 `BOARD_IP`、`REPEAT`：
+
+```sh
+#!/bin/sh
+BOARD_IP=192.168.1.101
+BOARD_USER=root
+REPEAT=10000
+OUTDIR=./stream_bench_out
+HOSTDIR=./stream_bench_logs
+
+mkdir -p "$OUTDIR" "$HOSTDIR"
+
+# 1. 板端起监控（注意先 cd，否则相对路径会落到 /root）
+ssh -T $BOARD_USER@$BOARD_IP "cd /data/npu_demo && mkdir -p logs \
+  && (nohup ./scripts/cpu_usage.sh >logs/cpu_console.log 2>&1 &) \
+  && (nohup ./scripts/mem_monitor.sh >logs/mem_console.log 2>&1 &) \
+  && (nohup ./scripts/proc_cpu.sh >logs/proc_console.log 2>&1 &) \
+  && sleep 1 && echo monitors started"
+
+# 2. 跑样例：stdout 只有协议帧，管道进主机接收器；板端日志走 ssh 的 stderr
+START=$(date +%s)
+ssh -T $BOARD_USER@$BOARD_IP "cd /data/npu_demo \
+  && export LD_LIBRARY_PATH=/data/npu_demo/lib \
+  && ./bin/sample_dual_model_abab \
+       /data/npu_demo/model/mobilenetv2_rgbplanar_b.ortm \
+       /data/npu_demo/input/ILSVRC2012_val_00024327.rgb \
+       /data/npu_demo/model/tiny-yolov3_yuv420sp_b.ortm \
+       /data/npu_demo/input/COCO_val2014_000000568213.yuv420sp \
+       $REPEAT /tmp 1" 2>"$HOSTDIR/board_stderr.log" \
+  | python3 host/npu_stream_receiver.py -q -o "$OUTDIR" 2>"$HOSTDIR/receiver_stderr.log"
+END=$(date +%s)
+echo "wall seconds: $((END - START))"
+
+# 3. 把板端监控日志拉回主机
+scp $BOARD_USER@$BOARD_IP:/data/npu_demo/logs/cpu_usage.log \
+    $BOARD_USER@$BOARD_IP:/data/npu_demo/logs/mem_usage.log \
+    $BOARD_USER@$BOARD_IP:/data/npu_demo/logs/proc_cpu.log "$HOSTDIR/"
+
+# 4. 与评估 1 相同的三条汇总
+awk -F, 'NR>1{s+=$2;n++} END{if(n) printf "whole-CPU avg=%.1f%% n=%d\n",s/n,n; else print "whole-CPU: no samples"}' "$HOSTDIR/cpu_usage.log"
+awk -F, 'NR>1{s+=$5;n++} END{if(n) printf "RSS avg=%.0fKB n=%d\n",s/n,n; else print "RSS: no samples"}' "$HOSTDIR/mem_usage.log"
+awk -F, 'NR>1{s+=$3;n++} END{if(n) printf "proc-CPU avg=%.1f%% n=%d\n",s/n,n; else print "proc-CPU: no samples (run too short, needs >=3s)"}' "$HOSTDIR/proc_cpu.log"
+
+# 5. 主机接收校验：结果行数应等于 2 * REPEAT，且无重同步/丢帧/CRC 错误
+echo "results lines: $(wc -l < "$OUTDIR/results.jsonl") (expect $((REPEAT * 2)))"
+if grep -qE 'resync|crc error|seq gap' "$HOSTDIR/receiver_stderr.log"; then
+    echo "STREAM ERRORS FOUND:"
+    grep -E 'resync|crc error|seq gap' "$HOSTDIR/receiver_stderr.log"
+else
+    echo "stream clean: no resync / crc error / seq gap"
+fi
+
+# 6. 清理板端监控残留
+ssh -T $BOARD_USER@$BOARD_IP "pkill -f 'scripts/(cpu_usage|mem_monitor|proc_cpu)' 2>/dev/null; true"
+```
+
+说明：第 2 步第 8 个参数 `1` 是 stream 级别（`1`=只发结果，`2`=追加压缩后的输出 tensor），`/tmp` 只是 `output_dir` 占位，流模式下被忽略。`receiver_stderr.log` 末尾的 `stream finished: {1: 1, 2: 20000}` 表示 1 个 SYNC + 20000 条 RESULT；任何日志混流、丢帧或校验失败都会在同一个文件里留下 `resync` / `seq gap` / `crc error` 行。
+
+板端实测参考（同模型同输入，10000 帧）：约 70s；进程 CPU 平均约单核 42%；RSS 稳定约 4.5MB；主机端 20000/20000 条结果、0 次重同步、0 次 CRC 错误、0 次丢帧。相比评估 1 多出的约 6s，约 1.4s 是板端 CPU（分类 top-k 读取 NPU 输出），约 4.5s 是每帧 2 个结果包经过 USB RNDIS→Windows→WSL 链路的固有延迟。若第 8 个参数改成 `2`（加发输出 tensor），瓶颈变为板端 zlib 压缩（673KB tensor 实测约 227ms）与链路带宽，10000 帧约需 57 分钟，仅建议短跑验证时使用。
