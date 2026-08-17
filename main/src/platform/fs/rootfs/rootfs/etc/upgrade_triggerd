@@ -1,8 +1,12 @@
 #!/bin/sh
-# upgrade_triggerd: COM-port trigger + version query for USB upgrade (UVC mode).
+# upgrade_triggerd: COM-port trigger + version query for USB upgrade.
 # Reads /dev/ttyGS0 (the CDC-ACM COM port). Two commands:
-#   UPGRADE:5AA55AA5  -> switch to upgrade mode (usb_mode_ctl upgrade)
+#   UPGRADE:5AA55AA5  -> switch to upgrade mode (WinUSB usb_receiver)
 #   VERSION?           -> reply with current firmware version, no mode switch
+#
+# RNDIS-specific: before entering upgrade mode this script releases the ether
+# gadget UDC, because usb_mode_ctl.sh only tears down the camera gadget and
+# would otherwise fail to bind the upgrade gadget while ether owns the UDC.
 TRIGGER=/etc/usb_mode_ctl.sh
 TTY=/dev/ttyGS0
 PIDFILE=/tmp/upgrade_triggerd.pid
@@ -28,6 +32,11 @@ while IFS= read -r line <&3; do
     line="${line%$cr}"
     case "$line" in
         "$TOKEN")
+            # Stop any leftover getty so it cannot compete for ttyGS0 input,
+            # release the RNDIS ether UDC, then switch to WinUSB upgrade mode.
+            killall getty 2>/dev/null
+            echo "" > /sys/kernel/config/usb_gadget/ether/UDC 2>/dev/null
+            sleep 1
             "$TRIGGER" upgrade >/dev/null 2>&1 &
             exit 0
             ;;
