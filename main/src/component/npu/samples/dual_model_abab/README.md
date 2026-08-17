@@ -13,14 +13,14 @@
 
 ## 代码模块
 
-| 模块 | 函数 | 说明 |
-| --- | --- | --- |
-| 模型初始化 | `model_init()` / `model_prepare_io()` | 加载模型、查询 IO 信息、分配 tensor、创建 dataset、设置 runtime buffer 和优先级 |
-| 模型预处理 | `model_preprocess()` | 从 input 目录读取数据并按模型的 shape/dtype/stride 写入输入 tensor |
-| 模型推理 | `ot_avp_npu_trigger()` | 异步触发推理 |
-| 模型交替调度 | main 中的 A/B 循环 | trigger A → trigger B → wait A → wait B |
-| 模型后处理 | `model_postprocess()` / `print_topk()` | 输出落盘；分类型 F32 `[1,N]` 输出额外打印 top-5 |
-| 资源回收 | `model_destroy()` | 销毁 dataset/tensor，卸载模型 |
+| 模块         | 函数                                       | 说明                                                                            |
+| ------------ | ------------------------------------------ | ------------------------------------------------------------------------------- |
+| 模型初始化   | `model_init()` / `model_prepare_io()`  | 加载模型、查询 IO 信息、分配 tensor、创建 dataset、设置 runtime buffer 和优先级 |
+| 模型预处理   | `model_preprocess()`                     | 从 input 目录读取数据并按模型的 shape/dtype/stride 写入输入 tensor              |
+| 模型推理     | `ot_avp_npu_trigger()`                   | 异步触发推理                                                                    |
+| 模型交替调度 | main 中的 A/B 循环                         | trigger A → trigger B → wait A → wait B                                      |
+| 模型后处理   | `model_postprocess()` / `print_topk()` | 输出落盘；分类型 F32`[1,N]` 输出额外打印 top-5                                |
+| 资源回收     | `model_destroy()`                        | 销毁 dataset/tensor，卸载模型                                                   |
 
 ## 编译
 
@@ -41,7 +41,7 @@ make
 
 ## 运行
 
-命令格式（6 个位置参数都可选）：
+命令格式（参数都可选，`output_dir` 尤其可选）：
 
 ```text
 sample_dual_model_abab [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir]
@@ -76,7 +76,7 @@ B: ../data/model/classification/mobilenetv2_rgbplanar_b.ortm
 - 单输入模型：`inputX` 传输入文件路径。
 - 多输入模型：`inputX` 传目录，目录内文件命名为 `0`、`1`、`2`…（对应输入索引）。
 - YUV420SP 输入：模型在工具链转换时声明 YUV420SP 输入即可直接喂原始 YUV420SP 文件；需要 RGB/NCHW 时要在此处补转换代码。
-- 输出保存在 `output_dir`，命名 `A_frameN_out0.bin` / `B_frameN_out0.bin`；F32 分类输出同时打印 top-5。
+- **性能模式**：不传 `output_dir` 时不保存任何输出文件、也不打印 top-k，适合 `repeat=10000` 这类大循环基准测试，避免输出把 `/data` 写满。带上 `output_dir` 时输出命名 `A_frameN_out0.bin` / `B_frameN_out0.bin`，F32 分类输出同时打印 top-5。
 
 ## 换成自己的模型要确认的点
 
@@ -101,12 +101,13 @@ scp -P $BOARD_PORT b_input.yuv420sp $BOARD_USER@$BOARD_IP:/data/npu_demo/input/
 
 ```sh
 cd /data/npu_demo
-export LD_LIBRARY_PATH=/data/npu_demo/sdk_lib:$LD_LIBRARY_PATH
-mkdir -p perf_out
+export LD_LIBRARY_PATH=/data/npu_demo/lib:$LD_LIBRARY_PATH
 ./bin/sample_dual_model_abab \
-  /data/npu_demo/model/my_model_a_b.ortm \
-  /data/npu_demo/input/a_input.bin \
-  /data/npu_demo/model/my_model_b_b.ortm \
-  /data/npu_demo/input/b_input.yuv420sp \
-  10000 /data/npu_demo/perf_out | tee /data/npu_demo/logs/abab.log
+  /data/npu_demo/model/mobilenetv2_rgbplanar_b.ortm \
+  /data/npu_demo/input/ILSVRC2012_val_00024327.rgb \
+  /data/npu_demo/model/tiny-yolov3_yuv420sp_b.ortm \
+  /data/npu_demo/input/COCO_val2014_000000568213.yuv420sp \
+  10000 | tee /data/npu_demo/logs/abab.log
 ```
+
+不传最后的 `output_dir`，即性能模式：只做预处理 → A/B 交替推理，不落盘、不打印 top-k。
