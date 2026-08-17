@@ -55,8 +55,7 @@ typedef struct {
     ot_u64            dpts_max;
 } camera_ctx;
 
-/* 模块内唯一实例；start/stop 接入前保持外部链接避免 -Werror=unused-variable */
-camera_ctx gs_ctx;
+static camera_ctx gs_ctx;
 static ot_bool gs_sys_init = OT_FALSE;
 static ot_eis_handle gs_media_pipe_hdl = OT_NULL;
 
@@ -237,4 +236,201 @@ void camera_deinit(void)
     sample_comm_sys_exit();
     gs_sys_init = OT_FALSE;
     printf("[camera] media system exit ok\n");
+}
+
+static ot_s32 camera_user_pool_create(ot_eis_img_attr *img_attr, ot_eis_handle *pool_hdl)
+{
+    ot_s32 ret;
+    ot_u32 block_size = 0;
+    ot_video_buffer_attr pool_attr = {0};
+    ot_eis_handle tmp = OT_NULL;
+
+    img_attr->bit_depth = OT_EIS_PIXEL_BIT_DEPTH_8;
+    sample_common_get_buffer_pool_cfg(img_attr, &block_size);
+    pool_attr.cnt = 1;
+    pool_attr.buf_blks[0].cnt = 10;
+    pool_attr.buf_blks[0].size = block_size;
+    ret = ot_buffer_pool_create(&tmp, &pool_attr);
+    if (ret != OT_SUCCESS) {
+        printf("[camera] buffer pool create fail, ret=%d\n", ret);
+        return ret;
+    }
+    *pool_hdl = tmp;
+    return OT_SUCCESS;
+}
+
+int32_t camera_start(void)
+{
+    ot_s32 ret = OT_SUCCESS;
+    ot_s32 i = 0;
+    ot_s32 done_vi = 0;
+    ot_s32 done_pool0 = 0;
+    ot_s32 done_pool2 = 0;
+    ot_s32 done_vp = 0;
+    ot_s32 done_bind = 0;
+    ot_bool pipe_sw[OT_EIS_VPROC_GRP_PIPE_MAX_NUM] = {OT_TRUE, OT_FALSE, OT_FALSE, OT_FALSE};
+    ot_bool chnl_sw_l[OT_EIS_VPROC_GRP_CHN_MAX_NUM] = {OT_TRUE, OT_FALSE, OT_TRUE, OT_FALSE};
+    ot_bool chnl_sw_r[OT_EIS_VPROC_GRP_CHN_MAX_NUM] = {OT_TRUE, OT_FALSE, OT_FALSE, OT_FALSE};
+    ot_eis_handle vi_pipe_hdl[OT_EIS_VI_MAX_PIPE_NUM] = {0};
+    ot_eis_handle vp_grp_hdl[OT_EIS_VI_MAX_PIPE_NUM] = {0};
+
+    if (gs_sys_init != OT_TRUE || gs_ctx.started == OT_TRUE) {
+        return OT_FAILURE;
+    }
+
+    for (i = 0; i < 2; i++) {
+        ot_s32 dev_id = (i == 0) ? 0 : 2;
+
+        sample_comm_vi_get_default_vi_cfg_by_dev_id(CAMERA_SNS_TYPE, &gs_ctx.vi_cfg[i], dev_id);
+        for (ot_s32 j = 0; j < 2; j++) {
+            gs_ctx.vi_cfg[i].pipe_info[0].pipe_id[j] = 2 * i + j;
+        }
+        ret = sample_comm_vi_start_vi(&gs_ctx.vi_cfg[i]);
+        if (ret != OT_SUCCESS) {
+            sample_print("camera vi start %d fail, ret:0x%x\n", i, ret);
+            goto vi_fail;
+        }
+        gs_ctx.vi_cfg[i].media_pipe_hdl = gs_media_pipe_hdl;
+        done_vi++;
+    }
+    for (i = 0; i < 2; i++) {
+        sample_media_vproc_get_default_attr_by_snsor(CAMERA_SNS_TYPE, &gs_ctx.vp_cfg[i]);
+        gs_ctx.vp_cfg[i].chn_attr[0].mode = OT_EIS_VPROC_WORK_MODE_USER;
+        gs_ctx.vp_cfg[i].chn_attr[0].frame_queue_depth = VPROC_FRAME_QUEUE_DEPTH;
+        gs_ctx.vp_cfg[i].chn_attr[0].image_attr.pixel_fmt = OT_EIS_IMAGE_FORMAT_YVU_420_SEMIPLANAR;
+        gs_ctx.vp_cfg[i].chn_attr[0].image_attr.width = 960;
+        gs_ctx.vp_cfg[i].chn_attr[0].image_attr.height = 1280;
+    }
+    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].mode = OT_EIS_VPROC_WORK_MODE_USER;
+    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].frame_queue_depth = 2;
+    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].image_attr.pixel_fmt = OT_EIS_IMAGE_FORMAT_YUV_420_SEMIPLANAR;
+    /* 270° 旋转交换输出宽高：按竖版 W=H_out/H=W_out 配置 */
+    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].image_attr.width = CAMERA_DET_OUT_H;
+    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].image_attr.height = CAMERA_DET_OUT_W;
+    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].image_attr.compress_mode = OT_EIS_IMAGE_COMPRESS_MODE_NONE;
+    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].frc.src_frame_rate = 30;
+    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].frc.dst_frame_rate = 10;
+
+    for (i = 0; i < 2; i++) {
+        ot_eis_handle pool_hdl = OT_NULL;
+
+        ret = camera_user_pool_create(&gs_ctx.vp_cfg[i].chn_attr[0].image_attr, &pool_hdl);
+        if (ret != OT_SUCCESS) {
+            goto pool_fail;
+        }
+        gs_ctx.vp_cfg[i].chn_attr[0].pool_handle = pool_hdl;
+        done_pool0++;
+    }
+    {
+        ot_eis_handle pool_hdl = OT_NULL;
+
+        ret = camera_user_pool_create(&gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].image_attr,
+                                      &pool_hdl);
+        if (ret != OT_SUCCESS) {
+            goto pool_fail;
+        }
+        gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].pool_handle = pool_hdl;
+        done_pool2++;
+    }
+    ret = sample_comm_start_vproc(&gs_ctx.vp_cfg[0], pipe_sw, chnl_sw_l);
+    if (ret != OT_SUCCESS) {
+        sample_print("camera vproc L start fail\n");
+        goto vp_fail;
+    }
+    done_vp++;
+    ret = sample_comm_start_vproc(&gs_ctx.vp_cfg[1], pipe_sw, chnl_sw_r);
+    if (ret != OT_SUCCESS) {
+        sample_print("camera vproc R start fail\n");
+        goto vp_fail;
+    }
+    done_vp++;
+
+    for (i = 0; i < 2; i++) {
+        ot_eis_vproc_chn_rotation ro_param = {0};
+
+        gs_ctx.vp_cfg[i].set_attr.crop_param.enable = OT_TRUE;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_type = OT_EIS_COORD_ABS;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_rect.x = 60;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_rect.y = 0;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_rect.width = 960;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_rect.height = 1280;
+        ot_eis_vproc_grp_set_crop(gs_ctx.vp_cfg[i].grp_hdl,
+                                  &gs_ctx.vp_cfg[i].set_attr.crop_param);
+        ro_param.enable = OT_TRUE;
+        ro_param.angle = OT_EIS_RTT_270;
+        ot_eis_vproc_chn_set_rotation(gs_ctx.vp_cfg[i].chn_hdl[0], &ro_param);
+        if (i == 0) {
+            ot_eis_vproc_chn_set_rotation(gs_ctx.vp_cfg[i].chn_hdl[CAMERA_DET_CHN], &ro_param);
+        }
+    }
+    for (i = 0; i < 2; i++) {
+        ret = sample_comm_vi_bind_vproc(gs_ctx.vi_cfg[i].pipe_info[0].chn_info.chn_hdl,
+                                        gs_ctx.vp_cfg[i].pipe_hdl[0], gs_media_pipe_hdl);
+        if (ret != OT_SUCCESS) {
+            sample_print("camera vi bind vproc %d fail, ret:0x%x\n", i, ret);
+            goto bind_fail;
+        }
+        done_bind++;
+    }
+    for (i = 0; i < 2; i++) {
+        vi_pipe_hdl[i] = gs_ctx.vi_cfg[i].pipe_info[0].pipe_hdl;
+        vp_grp_hdl[i] = gs_ctx.vp_cfg[i].grp_hdl;
+    }
+    ret = camera_scene_auto_start("./param/sc132gs", vi_pipe_hdl, vp_grp_hdl, 2);
+    if (ret != OT_SUCCESS) {
+        sample_print("camera scene auto start fail, ret:0x%x\n", ret);
+        goto bind_fail;
+    }
+    gs_ctx.started = OT_TRUE;
+    printf("[camera] pipeline up: chn0=960x1280 YVU420SP, chn2=%dx%d YUV420SP frc=30->10\n",
+           CAMERA_DET_OUT_W, CAMERA_DET_OUT_H);
+    return OT_SUCCESS;
+
+bind_fail:
+    for (i = 0; i < done_bind; i++) {
+        sample_comm_vi_un_bind_vproc(gs_ctx.vi_cfg[i].pipe_info[0].chn_info.chn_hdl,
+                                     gs_ctx.vp_cfg[i].pipe_hdl[0], gs_media_pipe_hdl);
+    }
+vp_fail:
+    for (i = 0; i < done_vp; i++) {
+        sample_comm_stop_vproc(&gs_ctx.vp_cfg[i]);
+    }
+pool_fail:
+    for (i = 0; i < done_pool0; i++) {
+        ot_buffer_pool_destroy(gs_ctx.vp_cfg[i].chn_attr[0].pool_handle);
+    }
+    if (done_pool2 != 0) {
+        ot_buffer_pool_destroy(gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].pool_handle);
+    }
+vi_fail:
+    for (i = 0; i < done_vi; i++) {
+        sample_comm_vi_stop_vi(&gs_ctx.vi_cfg[i]);
+    }
+    return ret;
+}
+
+void camera_stop(void)
+{
+    if (gs_ctx.started != OT_TRUE) {
+        return;
+    }
+    if (gs_ctx.get_run == OT_TRUE) {
+        gs_ctx.get_run = OT_FALSE;
+        pthread_join(gs_ctx.get_tid, NULL);
+    }
+    camera_scene_auto_stop();
+    for (ot_s32 i = 0; i < 2; i++) {
+        sample_comm_vi_un_bind_vproc(gs_ctx.vi_cfg[i].pipe_info[0].chn_info.chn_hdl,
+                                     gs_ctx.vp_cfg[i].pipe_hdl[0], gs_media_pipe_hdl);
+    }
+    for (ot_s32 i = 0; i < 2; i++) {
+        sample_comm_stop_vproc(&gs_ctx.vp_cfg[i]);
+        ot_buffer_pool_destroy(gs_ctx.vp_cfg[i].chn_attr[0].pool_handle);
+    }
+    ot_buffer_pool_destroy(gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].pool_handle);
+    for (ot_s32 i = 0; i < 2; i++) {
+        sample_comm_vi_stop_vi(&gs_ctx.vi_cfg[i]);
+    }
+    gs_ctx.started = OT_FALSE;
+    printf("[camera] pipeline stopped\n");
 }
