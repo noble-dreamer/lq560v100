@@ -6,11 +6,13 @@
  */
 #include "ot_avp_npu_rts.h"
 #include "file_utils.h"
+#include "transfer.h"
 #include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #ifndef SIMULATOR
 #include "ot_smr.h"
 #ifndef OT_AVP_NPU_V200
@@ -29,6 +31,12 @@
 #define YOLO_OBJ_THRESH  (0.6f)
 #define YOLO_NMS_THRESH  (0.2f)
 #define YOLO_MAX_BOX     (4096)
+
+/* SSH stream payload kinds shared with the host-side receiver. */
+#define STREAM_KIND_CLASSIFY (1u)
+#define STREAM_KIND_DETECT   (2u)
+#define STREAM_SYNC_SIZE     (48u)
+#define STREAM_RESULT_HEAD   (8u)
 
 #define DEFAULT_MODEL_A  "../data/model/classification/resnet50_binary_b.ortm"
 #define DEFAULT_INPUT_A  "../data/ImageNet/binary/ILSVRC2012_val_00024327.bin"
@@ -52,12 +60,14 @@ typedef struct {
     ot_avp_npu_dataset *output_dataset;
     void *runtime_buf;
     model_kind kind;
+    ot_u32 model_id;
 } model_slot;
 
 static void usage(const char *prog)
 {
-    printf("Usage: %s [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir]\n", prog);
+    printf("Usage: %s [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir] [stream]\n", prog);
     printf("output_dir is optional; omit it to run in perf mode without saving results.\n");
+    printf("stream: 0=off, 1=send results over SSH stdout, 2=also send output tensors.\n");
     printf("Defaults:\n  A: %s <- %s\n  B: %s <- %s\n",
            DEFAULT_MODEL_A, DEFAULT_INPUT_A, DEFAULT_MODEL_B, DEFAULT_INPUT_B);
 }
@@ -148,7 +158,8 @@ static model_kind model_detect_kind(const model_slot *slot)
     return MODEL_KIND_RAW;
 }
 
-static ot_s32 model_init(model_slot *slot, const char *name, const char *model_path)
+static ot_s32 model_init(model_slot *slot, const char *name, ot_u32 model_id,
+                         const char *model_path)
 {
     ot_avp_npu_mdl_config mdl_cfg = {
         .priority_level = OT_AVP_MDL_PRI_MEDIUM,
@@ -158,6 +169,7 @@ static ot_s32 model_init(model_slot *slot, const char *name, const char *model_p
     ot_s32 ret;
 
     snprintf(slot->name, sizeof(slot->name), "%s", name);
+    slot->model_id = model_id;
     ret = ot_avp_npu_load_model(model_path, &slot->handle);
     if (ret != 0) {
         printf("[%s] load fail: %s\n", slot->name, model_path);
@@ -377,25 +389,24 @@ static ot_s32 model_preprocess(model_slot *slot, const char *input_path)
     return load_raw_input_file(slot, input_path);
 }
 
-static void print_topk(const char *name, const ot_avp_tensor *tensor, ot_u32 frame)
+/* 对分类模型常见的 F32 [1,N] 输出计算 top-k；形状不匹配时返回 false。 */
+static bool compute_topk(const ot_avp_tensor *tensor, ot_u32 idx[TOP_K], float val[TOP_K])
 {
     const float *data = (const float *)tensor->virt_addr;
-    ot_u32 idx[TOP_K] = {0};
-    float val[TOP_K];
     ot_u32 n;
     ot_u32 i;
     ot_u32 j;
     ot_u32 k;
 
-    /* 仅对分类模型常见的 F32 [1, N] 输出做 top-k */
     if (tensor->dtype != OT_AVP_DTYPE_F32 || tensor->shape.dim_size != 2 ||
         tensor->shape.dims[0] != 1) {
-        return;
+        return false;
     }
 
     n = (ot_u32)tensor->shape.dims[1];
     for (k = 0; k < TOP_K; k++) {
         val[k] = -FLT_MAX;
+        idx[k] = 0;
     }
     for (i = 0; i < n; i++) {
         ot_u32 min_k = 0;
@@ -419,6 +430,18 @@ static void print_topk(const char *name, const ot_avp_tensor *tensor, ot_u32 fra
         val[j] = tv;
         idx[j] = ti;
     }
+    return true;
+}
+
+static void print_topk(const char *name, const ot_avp_tensor *tensor, ot_u32 frame)
+{
+    ot_u32 idx[TOP_K];
+    float val[TOP_K];
+    ot_u32 k;
+
+    if (!compute_topk(tensor, idx, val)) {
+        return;
+    }
 
     printf("[%s] frame[%u] top-%d:", name, frame, TOP_K);
     for (k = 0; k < TOP_K; k++) {
@@ -427,11 +450,60 @@ static void print_topk(const char *name, const ot_avp_tensor *tensor, ot_u32 fra
     printf("\n");
 }
 
+/* 流起始同步帧：协议版本、tensor 开关、总帧数与两模型名/类型，供主机端校验。 */
+static ot_s32 stream_send_sync(transfer_ctx *tx, const model_slot *a, const model_slot *b,
+                               ot_u32 total_frames, bool stream_tensors)
+{
+    uint8_t payload[STREAM_SYNC_SIZE] = {0};
+
+    transfer_put_u8(payload + 0, TRANSFER_VERSION);
+    transfer_put_u8(payload + 1, stream_tensors ? 1u : 0u);
+    transfer_put_u16(payload + 2, 0);
+    transfer_put_u32(payload + 4, total_frames);
+    memcpy(payload + 8, a->name, NAME_MAX);
+    transfer_put_u8(payload + 24, (uint8_t)a->kind);
+    memcpy(payload + 28, b->name, NAME_MAX);
+    transfer_put_u8(payload + 44, (uint8_t)b->kind);
+    return transfer_send(tx, TRANSFER_TYPE_SYNC, 0, 0, payload, sizeof(payload), false);
+}
+
+/* 分类结果载荷：kind=1 + count + (idx u32, score f32) x count。 */
+static ot_s32 stream_send_classify_result(transfer_ctx *tx, const model_slot *slot,
+                                          ot_u32 seq, const ot_u32 idx[TOP_K],
+                                          const float val[TOP_K])
+{
+    uint8_t payload[STREAM_RESULT_HEAD + TOP_K * 8];
+    size_t off = 0;
+    ot_u32 k;
+
+    transfer_put_u8(payload + off, STREAM_KIND_CLASSIFY);
+    off += 4;
+    transfer_put_u32(payload + off, TOP_K);
+    off += 4;
+    for (k = 0; k < TOP_K; k++) {
+        transfer_put_u32(payload + off, idx[k]);
+        transfer_put_f32(payload + off + 4, val[k]);
+        off += 8;
+    }
+    return transfer_send(tx, TRANSFER_TYPE_RESULT, (uint8_t)slot->model_id, seq,
+                         payload, off, false);
+}
+
 static ot_s32 classification_postprocess(model_slot *slot, const char *output_dir,
-                                         ot_u32 frame, bool save)
+                                         ot_u32 frame, bool save, transfer_ctx *tx,
+                                         ot_u32 seq)
 {
     ot_u32 i;
 
+    if (tx != NULL && slot->output_num > 0) {
+        ot_u32 idx[TOP_K];
+        float val[TOP_K];
+
+        if (compute_topk(&slot->outputs[0], idx, val)) {
+            return stream_send_classify_result(tx, slot, seq, idx, val);
+        }
+        return 0;
+    }
     if (!save) {
         return 0;
     }
@@ -467,6 +539,47 @@ typedef struct {
     ot_u32 class_id;
     bool suppressed;
 } yolo_box;
+
+/* 检测结果载荷：kind=2 + count + (x1,y1,x2,y2,score f32 + class_id u32) x count。 */
+static ot_s32 stream_send_detect_result(transfer_ctx *tx, const model_slot *slot,
+                                        ot_u32 seq, const yolo_box *boxes, ot_u32 box_num)
+{
+    uint8_t *payload;
+    size_t off = STREAM_RESULT_HEAD;
+    ot_u32 kept = 0;
+    ot_u32 o;
+    ot_s32 ret;
+
+    for (o = 0; o < box_num; o++) {
+        if (!boxes[o].suppressed) {
+            kept++;
+        }
+    }
+    payload = (uint8_t *)malloc(STREAM_RESULT_HEAD + (size_t)kept * 24u);
+    if (payload == NULL) {
+        return -1;
+    }
+    transfer_put_u8(payload, STREAM_KIND_DETECT);
+    transfer_put_u32(payload + 4, kept);
+    for (o = 0; o < box_num; o++) {
+        const yolo_box *b = &boxes[o];
+
+        if (b->suppressed) {
+            continue;
+        }
+        transfer_put_f32(payload + off, b->x1);
+        transfer_put_f32(payload + off + 4, b->y1);
+        transfer_put_f32(payload + off + 8, b->x2);
+        transfer_put_f32(payload + off + 12, b->y2);
+        transfer_put_f32(payload + off + 16, b->score);
+        transfer_put_u32(payload + off + 20, b->class_id);
+        off += 24;
+    }
+    ret = transfer_send(tx, TRANSFER_TYPE_RESULT, (uint8_t)slot->model_id, seq,
+                        payload, off, false);
+    free(payload);
+    return ret;
+}
 
 static float yolo_sigmoid(float x)
 {
@@ -571,7 +684,8 @@ static float yolo_iou(const yolo_box *a, const yolo_box *b)
 
 /* tiny-yolov3：两路 NHWC [1,H,W,255] 输出做置信度阈值过滤 + NMS */
 static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *output_dir,
-                                              ot_u32 frame, bool save)
+                                              ot_u32 frame, bool save, transfer_ctx *tx,
+                                              ot_u32 seq)
 {
     static const ot_s32 masks[YOLO_OUTPUT_NUM][YOLO_ANCHOR_NUM] = {
         {0, 1, 2}, {3, 4, 5},
@@ -626,10 +740,16 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
         }
     }
 
-    /* 性能模式也执行解码+NMS，只是不落盘、不打印检测结果 */
+    /* 性能模式也执行解码+NMS，只是不落盘、不打印检测结果；流模式把
+     * NMS 后的保留框序列化发送到主机。 */
     if (!save) {
+        ot_s32 sret = 0;
+
+        if (tx != NULL) {
+            sret = stream_send_detect_result(tx, slot, seq, boxes, box_num);
+        }
         free(boxes);
-        return 0;
+        return sret;
     }
 
     printf("[%s] frame[%u] detections after threshold+NMS:", slot->name, frame);
@@ -651,12 +771,12 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
 }
 
 static ot_s32 model_postprocess(model_slot *slot, const char *output_dir, ot_u32 frame,
-                                bool save)
+                                bool save, transfer_ctx *tx, ot_u32 seq)
 {
     if (slot->kind == MODEL_KIND_DETECT_YOLOV3) {
-        return tiny_yolov3_yuv420sp_postprocess(slot, output_dir, frame, save);
+        return tiny_yolov3_yuv420sp_postprocess(slot, output_dir, frame, save, tx, seq);
     }
-    return classification_postprocess(slot, output_dir, frame, save);
+    return classification_postprocess(slot, output_dir, frame, save, tx, seq);
 }
 
 int main(int argc, char **argv)
@@ -667,9 +787,14 @@ int main(int argc, char **argv)
     const char *input_b = (argc > 4) ? argv[4] : DEFAULT_INPUT_B;
     ot_u32 repeat = (argc > 5) ? (ot_u32)atoi(argv[5]) : 1;
     const char *output_dir = (argc > 6) ? argv[6] : NULL;
-    bool save_output = (output_dir != NULL);
+    ot_u32 stream_level = (argc > 7) ? (ot_u32)atoi(argv[7]) : 0;
+    bool stream_mode = (stream_level > 0);
+    bool stream_tensors = (stream_level >= 2);
+    bool save_output = (output_dir != NULL) && !stream_mode;
     model_slot models[MODEL_NUM] = {0};
     ot_avp_npu_config config = {0};
+    transfer_ctx tx;
+    int stream_fd = -1;
     ot_u32 frame;
     ot_s32 ret;
 
@@ -697,13 +822,33 @@ int main(int argc, char **argv)
         goto smr_out;
     }
 
-    ret = model_init(&models[0], "A", model_a);
+    if (stream_mode) {
+        /* 流模式下 stdout 只承载协议帧，printf 日志改走 stderr。 */
+        stream_fd = dup(STDOUT_FILENO);
+        if (stream_fd < 0) {
+            fprintf(stderr, "stream: duplicate stdout fail\n");
+            ret = -1;
+            goto cleanup_models;
+        }
+        dup2(STDERR_FILENO, STDOUT_FILENO);
+        transfer_init(&tx, STDIN_FILENO, stream_fd);
+    }
+
+    ret = model_init(&models[0], "A", 0, model_a);
     if (ret != 0) {
         goto cleanup_models;
     }
-    ret = model_init(&models[1], "B", model_b);
+    ret = model_init(&models[1], "B", 1, model_b);
     if (ret != 0) {
         goto cleanup_models;
+    }
+
+    if (stream_mode) {
+        ret = stream_send_sync(&tx, &models[0], &models[1], repeat, stream_tensors);
+        if (ret != 0) {
+            printf("[stream] send sync fail\n");
+            goto cleanup_models;
+        }
     }
 
     if (save_output) {
@@ -711,7 +856,9 @@ int main(int argc, char **argv)
     }
 
     for (frame = 0; frame < repeat; frame++) {
-        printf("\n===== frame %u =====\n", frame);
+        if (!stream_mode) {
+            printf("\n===== frame %u =====\n", frame);
+        }
 
         /* 1. 预处理两个模型，输入来自 input 目录 */
         ret = model_preprocess(&models[0], input_a);
@@ -743,7 +890,8 @@ int main(int argc, char **argv)
             printf("[A] wait fail: %d\n", ret);
             break;
         }
-        ret = model_postprocess(&models[0], output_dir, frame, save_output);
+        ret = model_postprocess(&models[0], output_dir, frame, save_output,
+                                stream_mode ? &tx : NULL, frame);
         if (ret != 0) {
             break;
         }
@@ -754,7 +902,8 @@ int main(int argc, char **argv)
             printf("[B] wait fail: %d\n", ret);
             break;
         }
-        ret = model_postprocess(&models[1], output_dir, frame, save_output);
+        ret = model_postprocess(&models[1], output_dir, frame, save_output,
+                                stream_mode ? &tx : NULL, frame);
         if (ret != 0) {
             break;
         }
@@ -766,6 +915,9 @@ cleanup_models:
     model_destroy(&models[1]);
     model_destroy(&models[0]);
 
+    if (stream_fd >= 0) {
+        close(stream_fd);
+    }
     ot_avp_npu_deinit();
 smr_out:
 #ifndef SIMULATOR
