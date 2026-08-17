@@ -105,7 +105,7 @@ def parse_result(payload):
             offset = 16 + index * 8
             idx, score = struct.unpack_from("<If", payload, offset)
             entries.append([idx, round(score, 6)])
-        return "classify", duration_us, entries
+        return "classify", duration_us, entries, 0, 0
     if kind == KIND_DETECT:
         entries = []
         for index in range(count):
@@ -113,8 +113,11 @@ def parse_result(payload):
             x1, y1, x2, y2, score, class_id = struct.unpack_from("<5fI", payload, offset)
             entries.append([round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2),
                             round(score, 4), class_id])
-        return "detect", duration_us, entries
-    return "raw", duration_us, list(payload)
+        src_w, src_h = 0, 0
+        if len(payload) >= 16 + count * 24 + 8:
+            src_w, src_h = struct.unpack_from("<II", payload, 16 + count * 24)
+        return "detect", duration_us, entries, src_w, src_h
+    return "raw", duration_us, list(payload), 0, 0
 
 def parse_tensor(payload):
     tensor_index, dtype, dim_size = payload[0], payload[1], payload[2]
@@ -169,11 +172,14 @@ def main():
                     log("seq gap: %s expected %d got %d"
                         % (model_name, expected[model_id], seq))
                 expected[model_id] = seq + 1
-                kind_name, duration_us, entries = parse_result(payload)
+                kind_name, duration_us, entries, src_w, src_h = parse_result(payload)
                 record = {"seq": seq, "model": model_name, "kind": kind_name,
                           "data": entries, "ts_us": ts_us,
                           "duration_us": duration_us,
                           "duration_ms": round(duration_us / 1000.0, 2)}
+                if kind_name == "detect" and src_w:
+                    record["src_w"] = src_w
+                    record["src_h"] = src_h
                 results.write(json.dumps(record) + "\n")
                 if not args.quiet and kind_name == "classify" and entries:
                     top = ", ".join("%d(%.4f)" % (idx, score) for idx, score in entries)

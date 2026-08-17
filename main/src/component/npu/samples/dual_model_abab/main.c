@@ -554,10 +554,11 @@ typedef struct {
 } yolo_box;
 
 /* 检测结果载荷：kind=2 + count + duration_us + (x1,y1,x2,y2,score f32 +
- * class_id u32) x count。duration_us 为从本帧循环开始到这条结果发出的耗时。 */
+ * class_id u32) x count + src_w u32 + src_h u32。 */
 static ot_s32 stream_send_detect_result(transfer_ctx *tx, const model_slot *slot,
                                         ot_u32 seq, ot_u64 frame_start_us,
-                                        const yolo_box *boxes, ot_u32 box_num)
+                                        const yolo_box *boxes, ot_u32 box_num,
+                                        ot_u32 src_w, ot_u32 src_h)
 {
     uint8_t *payload;
     size_t off = STREAM_RESULT_HEAD;
@@ -570,7 +571,7 @@ static ot_s32 stream_send_detect_result(transfer_ctx *tx, const model_slot *slot
             kept++;
         }
     }
-    payload = (uint8_t *)malloc(STREAM_RESULT_HEAD + (size_t)kept * 24u);
+    payload = (uint8_t *)malloc(STREAM_RESULT_HEAD + (size_t)kept * 24u + 8u);
     if (payload == NULL) {
         return -1;
     }
@@ -591,6 +592,9 @@ static ot_s32 stream_send_detect_result(transfer_ctx *tx, const model_slot *slot
         transfer_put_u32(payload + off + 20, b->class_id);
         off += 24;
     }
+    transfer_put_u32(payload + off, src_w);
+    transfer_put_u32(payload + off + 4, src_h);
+    off += 8;
     ret = transfer_send(tx, TRANSFER_TYPE_RESULT, (uint8_t)slot->model_id, seq,
                         payload, off, false);
     free(payload);
@@ -804,10 +808,36 @@ static float yolo_iou(const yolo_box *a, const yolo_box *b)
                     (b->x2 - b->x1) * (b->y2 - b->y1) - inter + 1e-9f);
 }
 
+/* 把 416 模型空间的检测框映射回源分辨率（参考工具链样例 rescale） */
+static void yolo_rescale(yolo_box *b, ot_u32 src_w, ot_u32 src_h)
+{
+    float max_side;
+    float pad_x;
+    float pad_y;
+    float unpad_w;
+    float unpad_h;
+
+    if (src_w == 0 || src_h == 0) {
+        return;
+    }
+    max_side = (src_w > src_h) ? (float)src_w : (float)src_h;
+    pad_x = ((src_h > src_w) ? (float)(src_h - src_w) : 0.0f) *
+            ((float)YOLO_INPUT_DIM / max_side);
+    pad_y = ((src_w > src_h) ? (float)(src_w - src_h) : 0.0f) *
+            ((float)YOLO_INPUT_DIM / max_side);
+    unpad_w = (float)YOLO_INPUT_DIM - pad_x;
+    unpad_h = (float)YOLO_INPUT_DIM - pad_y;
+    b->x1 = (b->x1 - pad_x * 0.5f) / unpad_w * (float)src_w;
+    b->y1 = (b->y1 - pad_y * 0.5f) / unpad_h * (float)src_h;
+    b->x2 = (b->x2 - pad_x * 0.5f) / unpad_w * (float)src_w;
+    b->y2 = (b->y2 - pad_y * 0.5f) / unpad_h * (float)src_h;
+}
+
 /* tiny-yolov3：两路 NHWC [1,H,W,255] 输出做置信度阈值过滤 + NMS */
 static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *output_dir,
                                               ot_u32 frame, bool save, transfer_ctx *tx,
-                                              ot_u32 seq, ot_u64 frame_start_us)
+                                              ot_u32 seq, ot_u64 frame_start_us,
+                                              ot_u32 src_w, ot_u32 src_h)
 {
     static const ot_s32 masks[YOLO_OUTPUT_NUM][YOLO_ANCHOR_NUM] = {
         {0, 1, 2}, {3, 4, 5},
@@ -861,6 +891,11 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
             }
         }
     }
+    for (o = 0; o < (ot_s32)box_num; o++) {
+        if (!boxes[o].suppressed) {
+            yolo_rescale(&boxes[o], src_w, src_h);
+        }
+    }
 
     /* 性能模式也执行解码+NMS，只是不落盘、不打印检测结果；流模式把
      * NMS 后的保留框序列化发送到主机。 */
@@ -869,7 +904,7 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
 
         if (tx != NULL) {
             sret = stream_send_detect_result(tx, slot, seq, frame_start_us, boxes,
-                                             box_num);
+                                             box_num, src_w, src_h);
         }
         free(boxes);
         return sret;
@@ -895,11 +930,11 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
 
 static ot_s32 model_postprocess(model_slot *slot, const char *output_dir, ot_u32 frame,
                                 bool save, transfer_ctx *tx, ot_u32 seq,
-                                ot_u64 frame_start_us)
+                                ot_u64 frame_start_us, ot_u32 src_w, ot_u32 src_h)
 {
     if (slot->kind == MODEL_KIND_DETECT_YOLOV3) {
         return tiny_yolov3_yuv420sp_postprocess(slot, output_dir, frame, save, tx, seq,
-                                               frame_start_us);
+                                               frame_start_us, src_w, src_h);
     }
     return classification_postprocess(slot, output_dir, frame, save, tx, seq,
                                       frame_start_us);
@@ -1070,7 +1105,7 @@ int main(int argc, char **argv)
             break;
         }
         ret = model_postprocess(&models[0], output_dir, frame, save_output,
-                                stream_mode ? &tx : NULL, frame, frame_start_us);
+                                stream_mode ? &tx : NULL, frame, frame_start_us, 0, 0);
         if (ret != 0) {
             break;
         }
@@ -1082,7 +1117,9 @@ int main(int argc, char **argv)
             break;
         }
         ret = model_postprocess(&models[1], output_dir, frame, save_output,
-                                stream_mode ? &tx : NULL, frame, frame_start_us);
+                                stream_mode ? &tx : NULL, frame, frame_start_us,
+                                camera_mode ? CAMERA_SRC_W : 0,
+                                camera_mode ? CAMERA_SRC_H : 0);
         if (ret != 0) {
             break;
         }

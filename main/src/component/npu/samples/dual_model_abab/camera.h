@@ -20,6 +20,10 @@ extern "C" {
 #define CAMERA_NPU_IN_H   416
 #define CAMERA_NPU_IN_LEN (CAMERA_NPU_IN_W * CAMERA_NPU_IN_H * 3 / 2)
 
+/* 相机检测结果报告用的源分辨率（检测框 rescale 目标） */
+#define CAMERA_SRC_W      640
+#define CAMERA_SRC_H      480
+
 typedef struct {
     uint32_t det_frames;   /* 检测通道累计帧数 */
     uint32_t lr_pairs;     /* 左右 PTS 配对帧数 */
