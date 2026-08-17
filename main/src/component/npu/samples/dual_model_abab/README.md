@@ -46,9 +46,11 @@ model_postprocess(&models[1], ...);
 
 - `mobilenetv2_rgbplanar_preprocess()`：校验输入为 UINT8 NCHW `[1,3,H,W]`，用 `load_data_from_file()` 按查询到的 stride 逐行写入；resize/crop/mean/std 已固化在离线模型的 Preprocess 节点里，软件侧无需重复做。
 - `tiny_yolov3_yuv420sp_preprocess()`：模型转换时已声明 YUV420SP 输入（内部完成 YUV420SP→RGBPlanar + letterbox），直接把整块 YUV420SP 数据 `fread` 进输入 tensor。
-- `tiny_yolov3_yuv420sp_postprocess()`：把两路 stride 对齐的 `[1,H,W,255]` F32 输出逐行拷到紧凑缓冲，按参考样例 `postProcess()` 做 sigmoid/exp 解码，0.6 目标置信度过滤，按分数降序做 0.2 IoU 的 NMS，最后打印 `class/score/box`。坐标是 416×416 模型输入空间，映射回原图分辨率需要原图宽高，可仿照参考样例的 `rescale()` 补上。
+- `tiny_yolov3_yuv420sp_postprocess()`：**直接在 stride 对齐的 `[1,H,W,255]` F32 输出上解码**——每个 anchor 先只读 objectness，过阈值才读该 anchor 的 85 个 float，避免把整块 NPU 输出拷进紧凑缓冲（板端实测整块拷贝约 14.5ms/frame，是主要瓶颈）。随后按参考样例 `postProcess()` 做 sigmoid/exp 解码、0.6 目标置信度过滤、按分数降序做 0.2 IoU 的 NMS，最后打印 `class/score/box`。坐标是 416×416 模型输入空间，映射回原图分辨率需要原图宽高，可仿照参考样例的 `rescale()` 补上。
 
-性能模式（不传 `output_dir`）跳过所有落盘和 top-5/检测打印，预处理和 trigger/wait 仍完整执行，保证大循环基准测试不会写满 `/data`。
+性能模式（不传 `output_dir`）不落盘、不打印 top-5/检测框，但预处理、trigger/wait 以及检测解码+NMS 计算仍完整执行，保证基准测试覆盖真实 CPU 开销且不会写满 `/data`。
+
+板端实测（mobilenetv2_rgbplanar + tiny-yolov3_yuv420sp，10000 帧，性能模式）：约 63s；进程 CPU 平均约为单核的 37%；RSS 稳定约 4.2MB。对比只有 trigger/wait、跳过检测后处理的基线（约 56s、单核 30%、RSS 4.3MB），加入预处理和检测后处理后仍以 NPU 推理为主，CPU 与内存都不是瓶颈。
 
 ## 编译
 
