@@ -626,6 +626,7 @@ static ot_s32 stream_send_tensors(transfer_ctx *tx, const model_slot *slot, ot_u
         ot_u32 elem = stream_dtype_bytes(t->dtype);
         ot_u64 rows = 1;
         ot_u32 line_size;
+        size_t compact;
         uint8_t *payload;
         uint8_t *raw;
         ot_u32 d;
@@ -639,7 +640,10 @@ static ot_s32 stream_send_tensors(transfer_ctx *tx, const model_slot *slot, ot_u
             rows *= (ot_u64)(ot_u32)t->shape.dims[d];
         }
         line_size = (ot_u32)t->shape.dims[t->shape.dim_size - 1] * elem;
-        payload = (uint8_t *)malloc(STREAM_TENSOR_HEAD + (size_t)t->len);
+        /* NPU 输出缓冲按行 stride 对齐，tensor.len 含行间 padding；只发送
+         * 按行紧凑后的有效字节，与落盘模式 dump_data_to_file 的语义一致。 */
+        compact = (size_t)rows * (size_t)line_size;
+        payload = (uint8_t *)malloc(STREAM_TENSOR_HEAD + compact);
         if (payload == NULL) {
             return -1;
         }
@@ -660,7 +664,7 @@ static ot_s32 stream_send_tensors(transfer_ctx *tx, const model_slot *slot, ot_u
         }
         transfer_put_u32(payload + 36, (uint32_t)t->stride.dims[0]);
         ret = transfer_send(tx, TRANSFER_TYPE_TENSOR, (uint8_t)slot->model_id, seq,
-                            payload, STREAM_TENSOR_HEAD + (size_t)t->len, true);
+                            payload, STREAM_TENSOR_HEAD + compact, true);
         free(payload);
         if (ret != 0) {
             return ret;

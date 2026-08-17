@@ -129,21 +129,31 @@ static inline uint64_t transfer_get_u64(const uint8_t *p)
            ((uint64_t)transfer_get_u32(p + 4) << 32);
 }
 
-/* IEEE CRC32, identical to Python's binascii.crc32. Table-free variant keeps
- * this header self-contained; payloads here are small enough for bitwise CRC. */
+/* IEEE CRC32, identical to Python's binascii.crc32. 查表实现：大 tensor 载荷
+ * 下比逐位计算快约 8 倍，是 stream=2 模式的 CPU 热点之一。 */
 static inline uint32_t transfer_crc32(const void *data, size_t len)
 {
+    static uint32_t table[256];
+    static bool ready = false;
     const uint8_t *p = (const uint8_t *)data;
     uint32_t crc = 0xffffffffu;
     size_t i;
 
-    for (i = 0; i < len; i++) {
+    if (!ready) {
         uint32_t j;
 
-        crc ^= p[i];
-        for (j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ ((crc & 1u) ? 0xedb88320u : 0u);
+        for (i = 0; i < 256; i++) {
+            uint32_t c = i;
+
+            for (j = 0; j < 8; j++) {
+                c = (c & 1u) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
+            }
+            table[i] = c;
         }
+        ready = true;
+    }
+    for (i = 0; i < len; i++) {
+        crc = table[(crc ^ p[i]) & 0xffu] ^ (crc >> 8);
     }
     return crc ^ 0xffffffffu;
 }
