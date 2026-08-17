@@ -6,8 +6,10 @@
  */
 #include "transfer.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/uio.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -17,6 +19,47 @@ static uint64_t now_us(void)
 
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
+}
+
+/* 一次 writev 把帧头和载荷写入通道：SSH 按写次数组包，减少小包数量能
+ * 明显降低 USB/RNDIS 链路上的传输延迟。 */
+static int write_frame(int fd, const void *header, const void *payload, size_t payload_len)
+{
+    struct iovec iov[2];
+    struct iovec *cur = iov;
+    int iovcnt = 1;
+    size_t total = TRANSFER_HEADER_SIZE + payload_len;
+    size_t done = 0;
+
+    cur[0].iov_base = (void *)header;
+    cur[0].iov_len = TRANSFER_HEADER_SIZE;
+    if (payload_len > 0) {
+        cur[1].iov_base = (void *)payload;
+        cur[1].iov_len = payload_len;
+        iovcnt = 2;
+    }
+    while (done < total) {
+        ssize_t n = writev(fd, cur, iovcnt);
+
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        done += (size_t)n;
+        /* 按已写字节数推进 iovec，处理部分写 */
+        while (iovcnt > 0 && (size_t)n >= cur[0].iov_len) {
+            n -= (ssize_t)cur[0].iov_len;
+            cur++;
+            iovcnt--;
+        }
+        if (iovcnt > 0 && n > 0) {
+            cur[0].iov_base = (uint8_t *)cur[0].iov_base + n;
+            cur[0].iov_len -= (size_t)n;
+        }
+    }
+    return 0;
 }
 
 int transfer_init(transfer_ctx *ctx, int fd_in, int fd_out)
@@ -62,11 +105,7 @@ int transfer_send(transfer_ctx *ctx, uint8_t type, uint8_t model_id, uint32_t se
     h.payload_crc = transfer_crc32(wire != NULL ? wire : payload, wire_len);
 
     transfer_header_encode(&h, header);
-    if (transfer_write_full(ctx->fd_out, header, sizeof(header)) != 0) {
-        goto out;
-    }
-    if (wire_len > 0 &&
-        transfer_write_full(ctx->fd_out, wire != NULL ? wire : payload, wire_len) != 0) {
+    if (write_frame(ctx->fd_out, header, wire != NULL ? wire : payload, wire_len) != 0) {
         goto out;
     }
     ret = 0;
