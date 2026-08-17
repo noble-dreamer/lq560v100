@@ -118,6 +118,13 @@ main/src/component/media/sample/vi/sample_vi
 main/src/component/media/sample/vo/sample_vo
 main/src/component/media/sample/vproc/sample_vproc
 main/src/component/npu/samples/ortm_run_model/ortm_run_model
+main/src/component/npu/samples/custom_abs/sample_custom_abs
+main/src/component/npu/samples/dual_model_abab/sample_dual_model_abab
+main/src/component/npu/samples/mobilenetv2_rgbplanar/sample_mobilenetv2
+main/src/component/npu/samples/resnet50_binary/sample_resenet50
+main/src/component/npu/samples/sample_api_user_guide/sample_api_user_guide
+main/src/component/npu/samples/sample_shared_lib/sample_shared_lib
+main/src/component/npu/libs/libot_avp_npu_custom_opsets_extern.so
 main/src/component/upgrade/ota_prepare/ota_prepare
 main/src/component/upgrade/sample/sample_upgrade
 main/src/component/upgrade/usb_receiver/usb_receiver
