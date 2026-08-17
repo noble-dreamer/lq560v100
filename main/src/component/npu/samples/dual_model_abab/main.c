@@ -593,9 +593,6 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
     ot_u32 kept = 0;
     ot_s32 o;
 
-    if (!save) {
-        return 0;
-    }
     if (slot->output_num != YOLO_OUTPUT_NUM) {
         printf("[%s] tiny-yolov3 expects 2 outputs, got %u\n",
                slot->name, slot->output_num);
@@ -659,6 +656,12 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
                 boxes[j].suppressed = true;
             }
         }
+    }
+
+    /* 性能模式也执行解码+NMS，只是不落盘、不打印检测结果 */
+    if (!save) {
+        free(boxes);
+        return 0;
     }
 
     printf("[%s] frame[%u] detections after threshold+NMS:", slot->name, frame);
