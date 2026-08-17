@@ -7,6 +7,7 @@
 #include "ot_avp_npu_rts.h"
 #include "file_utils.h"
 #include <float.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,11 @@
 #define TOP_K            (5)
 #define YOLO_CLASS_NUM   (80)
 #define YOLO_ANCHOR_NUM  (3)
+#define YOLO_OUTPUT_NUM  (2)
+#define YOLO_INPUT_DIM   (416)
+#define YOLO_OBJ_THRESH  (0.6f)
+#define YOLO_NMS_THRESH  (0.2f)
+#define YOLO_MAX_BOX     (4096)
 
 #define DEFAULT_MODEL_A  "../data/model/classification/resnet50_binary_b.ortm"
 #define DEFAULT_INPUT_A  "../data/ImageNet/binary/ILSVRC2012_val_00024327.bin"
@@ -421,8 +427,8 @@ static void print_topk(const char *name, const ot_avp_tensor *tensor, ot_u32 fra
     printf("\n");
 }
 
-static ot_s32 model_postprocess(model_slot *slot, const char *output_dir, ot_u32 frame,
-                                bool save)
+static ot_s32 classification_postprocess(model_slot *slot, const char *output_dir,
+                                         ot_u32 frame, bool save)
 {
     ot_u32 i;
 
@@ -450,6 +456,181 @@ static ot_s32 model_postprocess(model_slot *slot, const char *output_dir, ot_u32
         print_topk(slot->name, &slot->outputs[0], frame);
     }
     return 0;
+}
+
+typedef struct {
+    float x1;
+    float y1;
+    float x2;
+    float y2;
+    float score;
+    ot_u32 class_id;
+} yolo_box;
+
+static float yolo_sigmoid(float x)
+{
+    return 1.0f / (1.0f + expf(-x));
+}
+
+/* 输出 tensor 按行 stride 对齐，逐行拷到紧凑 F32 缓冲后再解码 */
+static ot_s32 yolo_copy_output(const ot_avp_tensor *tensor, float *dst)
+{
+    ot_u32 row_elems;
+    ot_u32 rows;
+    ot_u32 i;
+
+    if (tensor->dtype != OT_AVP_DTYPE_F32 || tensor->shape.dim_size != 4) {
+        return -1;
+    }
+    row_elems = (ot_u32)tensor->shape.dims[3];
+    rows = (ot_u32)tensor->shape.dims[0] * (ot_u32)tensor->shape.dims[1] *
+           (ot_u32)tensor->shape.dims[2];
+    for (i = 0; i < rows; i++) {
+        memcpy(dst + (ot_u64)i * row_elems,
+               (const ot_u8 *)tensor->virt_addr + (ot_u64)i * tensor->stride.dims[0],
+               (size_t)row_elems * sizeof(float));
+    }
+    return 0;
+}
+
+static ot_u32 yolo_decode_output(const float *out, ot_s32 grid_h, ot_s32 grid_w,
+                                 const ot_s32 mask[YOLO_ANCHOR_NUM],
+                                 yolo_box *boxes, ot_u32 box_num)
+{
+    static const float anchors[6][2] = {
+        {10.0f, 14.0f}, {23.0f, 27.0f}, {37.0f, 58.0f},
+        {81.0f, 82.0f}, {135.0f, 169.0f}, {344.0f, 319.0f},
+    };
+    const ot_s32 feat_len = YOLO_ANCHOR_NUM * (4 + 1 + YOLO_CLASS_NUM);
+    ot_u32 count = box_num;
+    ot_s32 cell;
+
+    for (cell = 0; cell < grid_h * grid_w; cell++) {
+        const float *cell_data = out + (ot_u64)cell * feat_len;
+        ot_s32 row = cell / grid_w;
+        ot_s32 col = cell % grid_w;
+        ot_s32 a;
+
+        for (a = 0; a < YOLO_ANCHOR_NUM; a++) {
+            const float *p = cell_data + a * (4 + 1 + YOLO_CLASS_NUM);
+            float conf = yolo_sigmoid(p[4]);
+            float best = 0.0f;
+            float cx;
+            float cy;
+            ot_u32 best_id = 0;
+            ot_s32 c;
+
+            if (conf < YOLO_OBJ_THRESH) {
+                continue;
+            }
+            for (c = 0; c < YOLO_CLASS_NUM; c++) {
+                float cls = yolo_sigmoid(p[5 + c]);
+
+                if (cls > best) {
+                    best = cls;
+                    best_id = (ot_u32)c;
+                }
+            }
+            cx = (yolo_sigmoid(p[0]) + (float)col) * YOLO_INPUT_DIM / (float)grid_w;
+            cy = (yolo_sigmoid(p[1]) + (float)row) * YOLO_INPUT_DIM / (float)grid_h;
+            if (count >= YOLO_MAX_BOX) {
+                return count;
+            }
+            boxes[count].x1 = cx - expf(p[2]) * anchors[mask[a]][0] * 0.5f;
+            boxes[count].y1 = cy - expf(p[3]) * anchors[mask[a]][1] * 0.5f;
+            boxes[count].x2 = cx + expf(p[2]) * anchors[mask[a]][0] * 0.5f;
+            boxes[count].y2 = cy + expf(p[3]) * anchors[mask[a]][1] * 0.5f;
+            boxes[count].score = conf * best;
+            boxes[count].class_id = best_id;
+            count++;
+        }
+    }
+    return count;
+}
+
+/* tiny-yolov3：两路 NHWC [1,H,W,255] 输出做置信度阈值过滤，得到候选框 */
+static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *output_dir,
+                                              ot_u32 frame, bool save)
+{
+    static const ot_s32 masks[YOLO_OUTPUT_NUM][YOLO_ANCHOR_NUM] = {
+        {0, 1, 2}, {3, 4, 5},
+    };
+    yolo_box *boxes;
+    ot_u32 box_num = 0;
+    ot_s32 o;
+
+    if (!save) {
+        return 0;
+    }
+    if (slot->output_num != YOLO_OUTPUT_NUM) {
+        printf("[%s] tiny-yolov3 expects 2 outputs, got %u\n",
+               slot->name, slot->output_num);
+        return -1;
+    }
+
+    boxes = (yolo_box *)calloc(YOLO_MAX_BOX, sizeof(yolo_box));
+    if (boxes == NULL) {
+        printf("[%s] alloc detection box buffer fail\n", slot->name);
+        return -1;
+    }
+
+    for (o = 0; o < slot->output_num; o++) {
+        const ot_avp_tensor *tensor = &slot->outputs[o];
+        ot_u64 elems = 1;
+        float *compact;
+        ot_s32 d;
+
+        for (d = 0; d < tensor->shape.dim_size; d++) {
+            elems *= (ot_u64)tensor->shape.dims[d];
+        }
+        compact = (float *)malloc((size_t)elems * sizeof(float));
+        if (compact == NULL) {
+            printf("[%s] alloc compact output[%d] fail\n", slot->name, o);
+            free(boxes);
+            return -1;
+        }
+        if (yolo_copy_output(tensor, compact) != 0) {
+            printf("[%s] output[%d] is not F32 [1,H,W,255]\n", slot->name, o);
+            free(compact);
+            free(boxes);
+            return -1;
+        }
+        box_num = yolo_decode_output(compact, tensor->shape.dims[1],
+                                     tensor->shape.dims[2], masks[o], boxes, box_num);
+        free(compact);
+
+        if (save) {
+            char path[FILE_PATH_MAX] = {0};
+
+            snprintf(path, sizeof(path), "%s%c%s_frame%u_out%d.bin",
+                     output_dir, PATH_SEPARATOR, slot->name, frame, o);
+            if (dump_data_to_file(path, (ot_u8 *)tensor->virt_addr, tensor->shape,
+                                  tensor->stride.dims[0], tensor->dtype) != 0) {
+                printf("[%s] dump output[%d] fail: %s\n", slot->name, o, path);
+                free(boxes);
+                return -1;
+            }
+        }
+    }
+
+    printf("[%s] frame[%u] candidates after threshold: %u\n",
+           slot->name, frame, box_num);
+    for (o = 0; o < (ot_s32)box_num; o++) {
+        printf("  class=%u score=%.3f box=(%.1f,%.1f)-(%.1f,%.1f)\n",
+               boxes[o].class_id, boxes[o].score, boxes[o].x1, boxes[o].y1,
+               boxes[o].x2, boxes[o].y2);
+    }
+    free(boxes);
+    return 0;
+}
+
+static ot_s32 model_postprocess(model_slot *slot, const char *output_dir, ot_u32 frame,
+                                bool save)
+{
+    if (slot->kind == MODEL_KIND_DETECT_YOLOV3) {
+        return tiny_yolov3_yuv420sp_postprocess(slot, output_dir, frame, save);
+    }
+    return classification_postprocess(slot, output_dir, frame, save);
 }
 
 int main(int argc, char **argv)
