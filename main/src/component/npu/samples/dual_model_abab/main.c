@@ -21,11 +21,19 @@
 #define MAX_IO_NUM       (8)
 #define NAME_MAX         (16)
 #define TOP_K            (5)
+#define YOLO_CLASS_NUM   (80)
+#define YOLO_ANCHOR_NUM  (3)
 
 #define DEFAULT_MODEL_A  "../data/model/classification/resnet50_binary_b.ortm"
 #define DEFAULT_INPUT_A  "../data/ImageNet/binary/ILSVRC2012_val_00024327.bin"
 #define DEFAULT_MODEL_B  "../data/model/classification/mobilenetv2_rgbplanar_b.ortm"
 #define DEFAULT_INPUT_B  "../data/ImageNet/rgbplanar/ILSVRC2012_val_00024327.rgb"
+
+typedef enum {
+    MODEL_KIND_RAW = 0,
+    MODEL_KIND_CLASSIFY,
+    MODEL_KIND_DETECT_YOLOV3,
+} model_kind;
 
 typedef struct {
     char name[NAME_MAX];
@@ -37,6 +45,7 @@ typedef struct {
     ot_avp_npu_dataset *input_dataset;
     ot_avp_npu_dataset *output_dataset;
     void *runtime_buf;
+    model_kind kind;
 } model_slot;
 
 static void usage(const char *prog)
@@ -57,6 +66,7 @@ static ot_s32 model_prepare_io(model_slot *slot, bool is_output)
     for (i = 0; i < num; i++) {
         ot_avp_npu_shape shape;
         ot_avp_data_type dtype;
+        ot_avp_npu_dformat format;
         ot_u32 size;
         ot_u32 stride;
         ot_s32 ret;
@@ -64,11 +74,13 @@ static ot_s32 model_prepare_io(model_slot *slot, bool is_output)
         if (is_output) {
             ot_avp_npu_get_output_shape_by_index(slot->handle, i, &shape);
             ot_avp_npu_get_output_dtype_by_index(slot->handle, i, &dtype);
+            ot_avp_npu_get_output_format_by_index(slot->handle, i, &format);
             size = ot_avp_npu_get_output_size_by_index(slot->handle, i);
             stride = ot_avp_npu_get_output_default_stride(slot->handle, i);
         } else {
             ot_avp_npu_get_input_shape_by_index(slot->handle, i, &shape);
             ot_avp_npu_get_input_dtype_by_index(slot->handle, i, &dtype);
+            ot_avp_npu_get_input_format_by_index(slot->handle, i, &format);
             size = ot_avp_npu_get_input_size_by_index(slot->handle, i);
             stride = ot_avp_npu_get_input_default_stride(slot->handle, i);
         }
@@ -76,6 +88,7 @@ static ot_s32 model_prepare_io(model_slot *slot, bool is_output)
         tensors[i].len = size;
         tensors[i].shape = shape;
         tensors[i].dtype = dtype;
+        tensors[i].format = format;
         tensors[i].stride.dims[0] = stride;
         ret = ot_avp_npu_malloc((ot_void **)&tensors[i].virt_addr, size);
         if (ret != 0) {
@@ -92,6 +105,41 @@ static ot_s32 model_prepare_io(model_slot *slot, bool is_output)
         }
     }
     return 0;
+}
+
+/* 依据查询到的输出特征识别模型类型，供预处理/后处理分发使用：
+ * tiny-yolov3: 两路 F32 [1,H,W,255] 输出（NHWC，H/W 为 26/13）
+ * 分类模型: 单路 F32 [1,N] 输出
+ * 其他: 按原始数据落盘 */
+static model_kind model_detect_kind(const model_slot *slot)
+{
+    ot_u32 i;
+
+    if (slot->output_num == 2) {
+        bool yolov3 = true;
+
+        for (i = 0; i < slot->output_num; i++) {
+            const ot_avp_tensor *out = &slot->outputs[i];
+
+            if (out->dtype != OT_AVP_DTYPE_F32 || out->shape.dim_size != 4 ||
+                out->shape.dims[0] != 1 || out->shape.dims[1] != out->shape.dims[2] ||
+                out->shape.dims[3] != YOLO_ANCHOR_NUM * (4 + 1 + YOLO_CLASS_NUM)) {
+                yolov3 = false;
+                break;
+            }
+        }
+        if (yolov3) {
+            return MODEL_KIND_DETECT_YOLOV3;
+        }
+    }
+
+    if (slot->output_num >= 1 &&
+        slot->outputs[0].dtype == OT_AVP_DTYPE_F32 &&
+        slot->outputs[0].shape.dim_size == 2 &&
+        slot->outputs[0].shape.dims[0] == 1) {
+        return MODEL_KIND_CLASSIFY;
+    }
+    return MODEL_KIND_RAW;
 }
 
 static ot_s32 model_init(model_slot *slot, const char *name, const char *model_path)
@@ -155,8 +203,12 @@ static ot_s32 model_init(model_slot *slot, const char *name, const char *model_p
         return ret;
     }
 
+    slot->kind = model_detect_kind(slot);
     printf("[%s] model ready: %s (in=%u out=%u)\n",
            slot->name, model_path, slot->input_num, slot->output_num);
+    printf("[%s] model kind: %s\n", slot->name,
+           slot->kind == MODEL_KIND_DETECT_YOLOV3 ? "detect-yolov3" :
+           slot->kind == MODEL_KIND_CLASSIFY ? "classify" : "raw");
     return 0;
 }
 
@@ -188,7 +240,8 @@ static void model_destroy(model_slot *slot)
     }
 }
 
-static ot_s32 model_preprocess(model_slot *slot, const char *input_path)
+/* 通用预处理：读裸数据文件（单输入传文件，多输入传目录 0,1,2...） */
+static ot_s32 load_raw_input_file(model_slot *slot, const char *input_path)
 {
     char **files = (char **)calloc(slot->input_num, sizeof(char *));
     ot_s32 ret = 0;
@@ -227,6 +280,95 @@ finish:
     }
     free(files);
     return ret;
+}
+
+/* mobilenetv2_rgbplanar：输入是模型要求的 RGB planar 裸数据（UINT8 NCHW）。
+ * 按模型查询到的 shape/stride 逐行拷入输入 tensor；resize/crop/mean/std 已
+ * 在离线模型转换时固化到 Preprocess 节点，无需在这里再做。 */
+static ot_s32 mobilenetv2_rgbplanar_preprocess(model_slot *slot, const char *input_path)
+{
+    const ot_avp_tensor *input;
+    ot_u64 expect;
+
+    if (slot->input_num != 1) {
+        printf("[%s] mobilenetv2_rgbplanar expects 1 input, got %u\n",
+               slot->name, slot->input_num);
+        return -1;
+    }
+    input = &slot->inputs[0];
+    if (input->dtype != OT_AVP_DTYPE_UINT8 || input->shape.dim_size != 4 ||
+        input->shape.dims[0] != 1 || input->shape.dims[1] != 3) {
+        printf("[%s] mobilenetv2_rgbplanar expects UINT8 NCHW [1,3,H,W] input\n",
+               slot->name);
+        return -1;
+    }
+    expect = (ot_u64)3 * (ot_u64)input->shape.dims[2] * (ot_u64)input->shape.dims[3];
+    if (input->len != expect) {
+        printf("[%s] mobilenetv2_rgbplanar input size %llu != 3*H*W (%llu)\n",
+               slot->name, (unsigned long long)input->len,
+               (unsigned long long)expect);
+        return -1;
+    }
+
+    if (load_data_from_file(input_path, (ot_u8 *)input->virt_addr, input->shape,
+                            input->stride.dims[0], input->dtype) != 0) {
+        printf("[%s] mobilenetv2_rgbplanar preprocess fail: %s\n",
+               slot->name, input_path);
+        return -1;
+    }
+    return 0;
+}
+
+/* tiny-yolov3_yuv420sp：模型转换时已声明 YUV420SP 输入（内部完成
+ * YUV420SP->RGBPlanar 和 letterbox），因此把整块 YUV420SP 数据读入输入
+ * tensor 即可，软件侧无需做 YUV->RGB/resize。 */
+static ot_s32 tiny_yolov3_yuv420sp_preprocess(model_slot *slot, const char *input_path)
+{
+    const ot_avp_tensor *input;
+    FILE *fp;
+    size_t nread;
+
+    if (slot->input_num != 1) {
+        printf("[%s] tiny_yolov3_yuv420sp expects 1 input, got %u\n",
+               slot->name, slot->input_num);
+        return -1;
+    }
+    input = &slot->inputs[0];
+    if (input->dtype != OT_AVP_DTYPE_UINT8) {
+        printf("[%s] tiny_yolov3_yuv420sp expects UINT8 input\n", slot->name);
+        return -1;
+    }
+
+    fp = fopen(input_path, "rb");
+    if (fp == NULL) {
+        printf("[%s] open input fail: %s\n", slot->name, input_path);
+        return -1;
+    }
+    nread = fread((ot_u8 *)input->virt_addr, 1, (size_t)input->len, fp);
+    fclose(fp);
+    if (nread != (size_t)input->len) {
+        printf("[%s] input %s has %zu bytes, model expects %llu\n",
+               slot->name, input_path, nread, (unsigned long long)input->len);
+        return -1;
+    }
+    return 0;
+}
+
+/* 按识别出的模型类型分发预处理；不匹配专用函数的模型退回通用裸数据加载 */
+static ot_s32 model_preprocess(model_slot *slot, const char *input_path)
+{
+    const ot_avp_tensor *input;
+
+    if (slot->kind == MODEL_KIND_DETECT_YOLOV3) {
+        return tiny_yolov3_yuv420sp_preprocess(slot, input_path);
+    }
+
+    input = &slot->inputs[0];
+    if (input->dtype == OT_AVP_DTYPE_UINT8 && input->shape.dim_size == 4 &&
+        input->shape.dims[0] == 1 && input->shape.dims[1] == 3) {
+        return mobilenetv2_rgbplanar_preprocess(slot, input_path);
+    }
+    return load_raw_input_file(slot, input_path);
 }
 
 static void print_topk(const char *name, const ot_avp_tensor *tensor, ot_u32 frame)
