@@ -2,7 +2,11 @@
  * camera_probe: 验证 sc132gs 双目媒体管线（不创建 UVC gadget）与检测通道参数。
  */
 #include "sample_comm.h"
+#include <dirent.h>
+#include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 #include "ot_scene.h"
 #include "ot_scenecomm.h"
@@ -32,10 +36,23 @@ typedef struct {
     sample_vi_cfg     vi_cfg[2];
     sample_vproc_attr vp_cfg[2];
     ot_bool           startup;
+    ot_bool           get_run;
+    pthread_t         get_tid;
 } probe_ctx;
+
+typedef struct {
+    ot_u32           det_frames;
+    ot_u32           lr_pairs;
+    ot_u64           dpts_sum;
+    ot_u64           dpts_min;
+    ot_u64           dpts_max;
+    ot_bool          det_info_printed;
+    pthread_mutex_t  lock;
+} probe_stats;
 
 static probe_scene_auto_ctx gs_scene_ctx;
 static probe_ctx gs_ctx;
+static probe_stats gs_stats;
 
 /* scene_auto 线程：先做静态 VI 参数设置与动态调优初始化，之后周期下发参数。
  * 与 uvc_app 的 sample_uvc_scene_norm_proc 保持一致。 */
@@ -299,8 +316,9 @@ static ot_s32 probe_startup(void)
     gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].mode = OT_EIS_VPROC_WORK_MODE_USER;
     gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].frame_queue_depth = 2;
     gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.pixel_fmt = OT_EIS_IMAGE_FORMAT_YUV_420_SEMIPLANAR;
-    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.width = PROBE_DET_W;
-    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.height = PROBE_DET_H;
+    /* 270° 旋转会交换输出宽高：按竖版 W=H_out/H=W_out 配置 */
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.width = PROBE_DET_H;
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.height = PROBE_DET_W;
     gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.compress_mode = OT_EIS_IMAGE_COMPRESS_MODE_NONE;
     gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].frc.src_frame_rate = 30;
     gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].frc.dst_frame_rate = 10;
@@ -429,19 +447,184 @@ static void probe_shutdown(void)
     printf("[probe] pipeline stopped\n");
 }
 
-int main(void)
+/* 左右原生帧按 PTS 配对并统计对齐误差；检测通道非阻塞取流、丢弃积压。 */
+static void probe_record_pair(ot_u64 pts_l, ot_u64 pts_r)
 {
+    ot_u64 dpts = (pts_l > pts_r) ? (pts_l - pts_r) : (pts_r - pts_l);
+
+    pthread_mutex_lock(&gs_stats.lock);
+    gs_stats.lr_pairs++;
+    gs_stats.dpts_sum += dpts;
+    if (gs_stats.lr_pairs == 1 || dpts < gs_stats.dpts_min) {
+        gs_stats.dpts_min = dpts;
+    }
+    if (dpts > gs_stats.dpts_max) {
+        gs_stats.dpts_max = dpts;
+    }
+    pthread_mutex_unlock(&gs_stats.lock);
+}
+
+static void *probe_get_frame_proc(void *p)
+{
+    probe_ctx *ctx = (probe_ctx *)p;
+    ot_eis_handle chn_l = ctx->vp_cfg[0].chn_hdl[0];
+    ot_eis_handle chn_r = ctx->vp_cfg[1].chn_hdl[0];
+    ot_eis_handle chn_d = ctx->vp_cfg[0].chn_hdl[PROBE_DET_CHN];
+    ot_eis_img_frame img_l = {0};
+    ot_eis_img_frame img_r = {0};
+    ot_eis_img_frame img_d = {0};
+
+    prctl(PR_SET_NAME, "probe-get-frame", 0, 0, 0);
+
+    while (ot_eis_vproc_chn_acquire_frame(chn_l, &img_l, 0) == OT_SUCCESS) {
+        ot_eis_vproc_chn_release_frame(chn_l, &img_l);
+    }
+    while (ot_eis_vproc_chn_acquire_frame(chn_r, &img_r, 0) == OT_SUCCESS) {
+        ot_eis_vproc_chn_release_frame(chn_r, &img_r);
+    }
+
+    while (ctx->get_run == OT_TRUE) {
+        ot_s32 ret = ot_eis_vproc_chn_acquire_frame(chn_l, &img_l, 500);
+
+        if (ret != OT_SUCCESS) {
+            usleep(100 * 1000);
+            continue;
+        }
+        ret = ot_eis_vproc_chn_acquire_frame(chn_r, &img_r, 500);
+        if (ret != OT_SUCCESS) {
+            ot_eis_vproc_chn_release_frame(chn_l, &img_l);
+            continue;
+        }
+
+        probe_record_pair(img_l.pts, img_r.pts);
+        ot_eis_vproc_chn_release_frame(chn_l, &img_l);
+        ot_eis_vproc_chn_release_frame(chn_r, &img_r);
+
+        while (ot_eis_vproc_chn_acquire_frame(chn_d, &img_d, 0) == OT_SUCCESS) {
+            pthread_mutex_lock(&gs_stats.lock);
+            if (gs_stats.det_info_printed == OT_FALSE) {
+                printf("[probe] det frame %ux%u fmt=%d compress=%d stride=%u/%u pts=%llu\n",
+                       img_d.attr.width, img_d.attr.height, img_d.attr.pixel_fmt,
+                       img_d.attr.compress_mode, img_d.buff.stride[0],
+                       img_d.buff.stride[1], (unsigned long long)img_d.pts);
+                gs_stats.det_info_printed = OT_TRUE;
+            }
+            gs_stats.det_frames++;
+            pthread_mutex_unlock(&gs_stats.lock);
+            ot_eis_vproc_chn_release_frame(chn_d, &img_d);
+        }
+    }
+    return OT_NULL;
+}
+
+static void probe_print_stats(ot_u32 elapsed_s, ot_bool final)
+{
+    ot_u32 det = 0;
+    ot_u32 pairs = 0;
+    ot_u64 sum = 0;
+    ot_u64 min = 0;
+    ot_u64 max = 0;
+
+    pthread_mutex_lock(&gs_stats.lock);
+    det = gs_stats.det_frames;
+    pairs = gs_stats.lr_pairs;
+    sum = gs_stats.dpts_sum;
+    min = gs_stats.dpts_min;
+    max = gs_stats.dpts_max;
+    pthread_mutex_unlock(&gs_stats.lock);
+
+    if (final) {
+        printf("[probe] final: det=%u frames %.1f fps, lr_pairs=%u, "
+               "dpts min/avg/max = %llu/%llu/%llu us\n",
+               det, (elapsed_s != 0) ? (double)det / (double)elapsed_s : 0.0,
+               pairs, (unsigned long long)min,
+               (pairs != 0) ? (unsigned long long)(sum / pairs) : 0,
+               (unsigned long long)max);
+    } else {
+        printf("[probe] t=%us det=%u lr_pairs=%u\n", elapsed_s, det, pairs);
+    }
+}
+
+static void probe_udc_snapshot(const char *tag)
+{
+    DIR *dir = opendir("/sys/class/udc");
+    struct dirent *ent;
+
+    if (dir == OT_NULL) {
+        printf("[probe] %s udc: open fail\n", tag);
+        return;
+    }
+    while ((ent = readdir(dir)) != OT_NULL) {
+        char path[320];
+        char buf[32] = {0};
+        int fd;
+        ssize_t n;
+
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+        snprintf(path, sizeof(path), "/sys/class/udc/%s/state", ent->d_name);
+        fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (n > 0 && buf[n - 1] == '\n') {
+                buf[n - 1] = 0;
+            }
+            printf("[probe] %s udc %s state=%s\n", tag, ent->d_name, buf);
+        }
+    }
+    closedir(dir);
+}
+
+int main(int argc, char **argv)
+{
+    ot_u32 run_s = (argc > 1) ? (ot_u32)atoi(argv[1]) : 30;
+    ot_u32 elapsed = 0;
+
+    if (run_s == 0) {
+        run_s = 1;
+    }
+    if (run_s > 300) {
+        run_s = 300;
+    }
+
     if (probe_sys_init() != OT_SUCCESS) {
         printf("[probe] init fail\n");
         return -1;
     }
+    probe_udc_snapshot("before");
     if (probe_startup() != OT_SUCCESS) {
         printf("[probe] startup fail\n");
         probe_sys_exit();
         return -1;
     }
-    sleep(5);
+
+    pthread_mutex_init(&gs_stats.lock, OT_NULL);
+    gs_ctx.get_run = OT_TRUE;
+    if (pthread_create(&gs_ctx.get_tid, OT_NULL, probe_get_frame_proc, &gs_ctx) != 0) {
+        printf("[probe] create get-frame thread fail\n");
+        gs_ctx.get_run = OT_FALSE;
+        probe_shutdown();
+        probe_sys_exit();
+        return -1;
+    }
+
+    while (elapsed < run_s) {
+        sleep(1);
+        elapsed++;
+        if ((elapsed % 5) == 0) {
+            probe_print_stats(elapsed, OT_FALSE);
+        }
+    }
+
+    gs_ctx.get_run = OT_FALSE;
+    pthread_join(gs_ctx.get_tid, OT_NULL);
+    probe_print_stats(run_s, OT_TRUE);
+    probe_udc_snapshot("after");
+
     probe_shutdown();
     probe_sys_exit();
+    pthread_mutex_destroy(&gs_stats.lock);
     return 0;
 }
