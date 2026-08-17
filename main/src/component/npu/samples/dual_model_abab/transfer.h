@@ -148,6 +148,19 @@ static inline uint32_t transfer_crc32(const void *data, size_t len)
     return crc ^ 0xffffffffu;
 }
 
+/* Sample-local internals shared between transfer*.c; not for pipeline use. */
+int transfer_compress_buf(const uint8_t *in, size_t in_len, uint8_t **out,
+                          size_t *out_len);
+int transfer_decompress_buf(const uint8_t *in, size_t in_len, uint8_t *out,
+                            size_t out_len);
+void transfer_header_encode(const transfer_header *h,
+                            uint8_t out[TRANSFER_HEADER_SIZE]);
+void transfer_header_decode(const uint8_t in[TRANSFER_HEADER_SIZE],
+                            transfer_header *h);
+int transfer_read_full(int fd, void *buf, size_t len, int timeout_ms);
+int transfer_write_full(int fd, const void *buf, size_t len);
+int transfer_read_header(transfer_ctx *ctx, int timeout_ms, transfer_header *h);
+
 int transfer_init(transfer_ctx *ctx, int fd_in, int fd_out);
 
 int transfer_send(transfer_ctx *ctx, uint8_t type, uint8_t model_id, uint32_t seq,
