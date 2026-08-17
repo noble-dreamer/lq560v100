@@ -37,6 +37,7 @@
 #define STREAM_KIND_DETECT   (2u)
 #define STREAM_SYNC_SIZE     (48u)
 #define STREAM_RESULT_HEAD   (8u)
+#define STREAM_TENSOR_HEAD   (40u)
 
 #define DEFAULT_MODEL_A  "../data/model/classification/resnet50_binary_b.ortm"
 #define DEFAULT_INPUT_A  "../data/ImageNet/binary/ILSVRC2012_val_00024327.bin"
@@ -581,6 +582,108 @@ static ot_s32 stream_send_detect_result(transfer_ctx *tx, const model_slot *slot
     return ret;
 }
 
+static ot_u32 stream_dtype_bytes(ot_avp_data_type dtype)
+{
+    switch (dtype) {
+    case OT_AVP_DTYPE_UINT8:
+    case OT_AVP_DTYPE_INT8:
+    case OT_AVP_DTYPE_BOOL:
+        return 1;
+    case OT_AVP_DTYPE_F16:
+    case OT_AVP_DTYPE_UINT16:
+    case OT_AVP_DTYPE_INT16:
+        return 2;
+    case OT_AVP_DTYPE_F32:
+    case OT_AVP_DTYPE_UINT32:
+    case OT_AVP_DTYPE_INT32:
+        return 4;
+    case OT_AVP_DTYPE_F64:
+    case OT_AVP_DTYPE_UINT64:
+    case OT_AVP_DTYPE_INT64:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+/* tensor 载荷：index/dtype/dim_size/dims[8]/stride 元信息 + 按行紧凑后的原始字节。
+ * 只在 stream=2 时使用：整块拷贝 NPU 输出会明显增加 CPU 开销，性能模式不启用。 */
+static ot_s32 stream_send_tensors(transfer_ctx *tx, const model_slot *slot, ot_u32 seq)
+{
+    ot_u32 o;
+
+    for (o = 0; o < slot->output_num; o++) {
+        const ot_avp_tensor *t = &slot->outputs[o];
+        ot_u32 elem = stream_dtype_bytes(t->dtype);
+        ot_u64 rows = 1;
+        ot_u32 line_size;
+        uint8_t *payload;
+        uint8_t *raw;
+        ot_u32 d;
+        ot_u32 i;
+        ot_s32 ret;
+
+        if (elem == 0) {
+            return -1;
+        }
+        for (d = 0; d + 1 < t->shape.dim_size; d++) {
+            rows *= (ot_u64)(ot_u32)t->shape.dims[d];
+        }
+        line_size = (ot_u32)t->shape.dims[t->shape.dim_size - 1] * elem;
+        payload = (uint8_t *)malloc(STREAM_TENSOR_HEAD + (size_t)t->len);
+        if (payload == NULL) {
+            return -1;
+        }
+        raw = payload + STREAM_TENSOR_HEAD;
+        for (i = 0; i < (ot_u32)rows; i++) {
+            memcpy(raw + (size_t)i * line_size,
+                   (const uint8_t *)t->virt_addr + (ot_u64)i * t->stride.dims[0],
+                   line_size);
+        }
+        payload[0] = (uint8_t)o;
+        payload[1] = (uint8_t)t->dtype;
+        payload[2] = t->shape.dim_size;
+        payload[3] = 0;
+        for (d = 0; d < 8; d++) {
+            uint32_t dim = (d < t->shape.dim_size) ? (uint32_t)t->shape.dims[d] : 0;
+
+            transfer_put_u32(payload + 4 + d * 4, dim);
+        }
+        transfer_put_u32(payload + 36, (uint32_t)t->stride.dims[0]);
+        ret = transfer_send(tx, TRANSFER_TYPE_TENSOR, (uint8_t)slot->model_id, seq,
+                            payload, STREAM_TENSOR_HEAD + (size_t)t->len, true);
+        free(payload);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+    return 0;
+}
+
+/* 非阻塞轮询 stdin：收到 STOP 控制帧时回 ACK 并返回 true。 */
+static bool stream_poll_stop(transfer_ctx *tx)
+{
+    uint8_t type;
+    uint8_t model;
+    uint32_t seq;
+    void *payload = NULL;
+    size_t len = 0;
+    bool stop = false;
+    int rc = transfer_recv(tx, 0, &type, &model, &seq, &payload, &len);
+
+    if (rc == TRANSFER_RECV_OK) {
+        if (type == TRANSFER_TYPE_CONTROL && len >= 1 &&
+            transfer_get_u8((const uint8_t *)payload) == TRANSFER_CTRL_STOP) {
+            uint8_t ack[1] = {TRANSFER_CTRL_STOP};
+
+            transfer_send(tx, TRANSFER_TYPE_ACK, 0, seq, ack, sizeof(ack), false);
+            stop = true;
+        }
+        free(payload);
+    }
+    return stop;
+}
+
 static float yolo_sigmoid(float x)
 {
     return 1.0f / (1.0f + expf(-x));
@@ -906,6 +1009,23 @@ int main(int argc, char **argv)
                                 stream_mode ? &tx : NULL, frame);
         if (ret != 0) {
             break;
+        }
+
+        /* 5. 流模式：按需发送输出 tensor（压缩后），并轮询主机控制帧 */
+        if (stream_mode) {
+            if (stream_tensors) {
+                ret = stream_send_tensors(&tx, &models[0], frame);
+                if (ret == 0) {
+                    ret = stream_send_tensors(&tx, &models[1], frame);
+                }
+                if (ret != 0) {
+                    break;
+                }
+            }
+            if (stream_poll_stop(&tx)) {
+                printf("[stream] host requested stop\n");
+                break;
+            }
         }
     }
 
