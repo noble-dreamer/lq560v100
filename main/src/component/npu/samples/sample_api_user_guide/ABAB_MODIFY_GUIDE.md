@@ -4,12 +4,12 @@
 
 ## 1. 样例文件与作用
 
-| 文件 | 作用 |
-| --- | --- |
-| `sample_npu_main.c` | 入口：初始化 SMR/media，解析用例序号，结束时回收资源 |
-| `sample_npu_async_inference.c` | 核心用例：双模型加载 + 交替调度（trigger/wait） |
-| `sample_npu_common.h/.c` | 通用工具：创建/销毁输入输出 tensor 和 dataset |
-| `Makefile` | 编译规则，生成的二进制为 `sample_api_user_guide` |
+| 文件                             | 作用                                                 |
+| -------------------------------- | ---------------------------------------------------- |
+| `sample_npu_main.c`            | 入口：初始化 SMR/media，解析用例序号，结束时回收资源 |
+| `sample_npu_async_inference.c` | 核心用例：双模型加载 + 交替调度（trigger/wait）      |
+| `sample_npu_common.h/.c`       | 通用工具：创建/销毁输入输出 tensor 和 dataset        |
+| `Makefile`                     | 编译规则，生成的二进制为`sample_api_user_guide`    |
 
 运行方式：
 
@@ -110,7 +110,7 @@ ot_avp_npu_get_output_dtype_by_index()
 ot_avp_npu_get_output_default_stride()
 ```
 
-注意输出缓冲区是按 stride 对齐的，逐行拷贝有效数据时要用 stride，不能直接把整块 buffer 当作紧凑数组。分类模型通常取 top-k；检测模型通常做阈值过滤 + NMS（参考 tiny-yolov3 样例的 `postProcess()`）。
+注意输出缓冲区是按 stride 对齐的，逐行拷贝有效数据时要用 stride，不能直接把整块 buffer 当作紧凑数组。分类模型通常取 top-k；检测模型通常做阈值过滤 + NMS（参考 tiny-yolov3 样例的 `postProcess()`）
 
 ### 3.6 模型优先级（trigger+trigger+wait 时必看）
 
