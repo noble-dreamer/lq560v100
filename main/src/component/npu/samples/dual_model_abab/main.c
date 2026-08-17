@@ -918,23 +918,24 @@ int main(int argc, char **argv)
     config.log_level = 2;
     config.thread_num = 2; /* >0 才支持 trigger/wait 异步推理 */
 
+    if (stream_mode) {
+        /* 流模式下 stdout 只承载协议帧，printf 日志改走 stderr。提前到
+         * npu 初始化之前，避免 NPU 库的启动日志混进帧流。 */
+        stream_fd = dup(STDOUT_FILENO);
+        if (stream_fd < 0) {
+            fprintf(stderr, "stream: duplicate stdout fail\n");
+            ret = -1;
+            goto smr_out;
+        }
+        dup2(STDERR_FILENO, STDOUT_FILENO);
+        transfer_init(&tx, STDIN_FILENO, stream_fd);
+    }
+
     ret = ot_avp_npu_init(&config);
     if (ret != 0) {
         printf("npu init fail\n");
         usage(argv[0]);
         goto smr_out;
-    }
-
-    if (stream_mode) {
-        /* 流模式下 stdout 只承载协议帧，printf 日志改走 stderr。 */
-        stream_fd = dup(STDOUT_FILENO);
-        if (stream_fd < 0) {
-            fprintf(stderr, "stream: duplicate stdout fail\n");
-            ret = -1;
-            goto cleanup_models;
-        }
-        dup2(STDERR_FILENO, STDOUT_FILENO);
-        transfer_init(&tx, STDIN_FILENO, stream_fd);
     }
 
     ret = model_init(&models[0], "A", 0, model_a);
