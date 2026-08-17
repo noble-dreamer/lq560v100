@@ -473,28 +473,10 @@ static float yolo_sigmoid(float x)
     return 1.0f / (1.0f + expf(-x));
 }
 
-/* 输出 tensor 按行 stride 对齐，逐行拷到紧凑 F32 缓冲后再解码 */
-static ot_s32 yolo_copy_output(const ot_avp_tensor *tensor, float *dst)
-{
-    ot_u32 row_elems;
-    ot_u32 rows;
-    ot_u32 i;
-
-    if (tensor->dtype != OT_AVP_DTYPE_F32 || tensor->shape.dim_size != 4) {
-        return -1;
-    }
-    row_elems = (ot_u32)tensor->shape.dims[3];
-    rows = (ot_u32)tensor->shape.dims[0] * (ot_u32)tensor->shape.dims[1] *
-           (ot_u32)tensor->shape.dims[2];
-    for (i = 0; i < rows; i++) {
-        memcpy(dst + (ot_u64)i * row_elems,
-               (const ot_u8 *)tensor->virt_addr + (ot_u64)i * tensor->stride.dims[0],
-               (size_t)row_elems * sizeof(float));
-    }
-    return 0;
-}
-
-static ot_u32 yolo_decode_output(const float *out, ot_s32 grid_h, ot_s32 grid_w,
+/* 直接在 stride 对齐的 NHWC [1,H,W,255] 输出上解码，避免先把整块输出
+ * 拷到紧凑缓冲（NPU 输出内存的读带宽是主要瓶颈）。每个 anchor 先只读
+ * objectness，过阈值才读该 anchor 的 85 个 float。 */
+static ot_u32 yolo_decode_output(const ot_avp_tensor *tensor, ot_s32 grid_h, ot_s32 grid_w,
                                  const ot_s32 mask[YOLO_ANCHOR_NUM],
                                  yolo_box *boxes, ot_u32 box_num)
 {
@@ -502,12 +484,14 @@ static ot_u32 yolo_decode_output(const float *out, ot_s32 grid_h, ot_s32 grid_w,
         {10.0f, 14.0f}, {23.0f, 27.0f}, {37.0f, 58.0f},
         {81.0f, 82.0f}, {135.0f, 169.0f}, {344.0f, 319.0f},
     };
-    const ot_s32 feat_len = YOLO_ANCHOR_NUM * (4 + 1 + YOLO_CLASS_NUM);
+    const ot_u8 *base = (const ot_u8 *)tensor->virt_addr;
+    const ot_u64 cell_stride = tensor->stride.dims[0];
     ot_u32 count = box_num;
     ot_s32 cell;
 
     for (cell = 0; cell < grid_h * grid_w; cell++) {
-        const float *cell_data = out + (ot_u64)cell * feat_len;
+        const float *cell_data =
+            (const float *)(base + (ot_u64)cell * cell_stride);
         ot_s32 row = cell / grid_w;
         ot_s32 col = cell % grid_w;
         ot_s32 a;
@@ -518,6 +502,8 @@ static ot_u32 yolo_decode_output(const float *out, ot_s32 grid_h, ot_s32 grid_w,
             float best = 0.0f;
             float cx;
             float cy;
+            float bw;
+            float bh;
             ot_u32 best_id = 0;
             ot_s32 c;
 
@@ -534,13 +520,15 @@ static ot_u32 yolo_decode_output(const float *out, ot_s32 grid_h, ot_s32 grid_w,
             }
             cx = (yolo_sigmoid(p[0]) + (float)col) * YOLO_INPUT_DIM / (float)grid_w;
             cy = (yolo_sigmoid(p[1]) + (float)row) * YOLO_INPUT_DIM / (float)grid_h;
+            bw = expf(p[2]) * anchors[mask[a]][0];
+            bh = expf(p[3]) * anchors[mask[a]][1];
             if (count >= YOLO_MAX_BOX) {
                 return count;
             }
-            boxes[count].x1 = cx - expf(p[2]) * anchors[mask[a]][0] * 0.5f;
-            boxes[count].y1 = cy - expf(p[3]) * anchors[mask[a]][1] * 0.5f;
-            boxes[count].x2 = cx + expf(p[2]) * anchors[mask[a]][0] * 0.5f;
-            boxes[count].y2 = cy + expf(p[3]) * anchors[mask[a]][1] * 0.5f;
+            boxes[count].x1 = cx - bw * 0.5f;
+            boxes[count].y1 = cy - bh * 0.5f;
+            boxes[count].x2 = cx + bw * 0.5f;
+            boxes[count].y2 = cy + bh * 0.5f;
             boxes[count].score = conf * best;
             boxes[count].class_id = best_id;
             count++;
@@ -607,28 +595,8 @@ static ot_s32 tiny_yolov3_yuv420sp_postprocess(model_slot *slot, const char *out
 
     for (o = 0; o < slot->output_num; o++) {
         const ot_avp_tensor *tensor = &slot->outputs[o];
-        ot_u64 elems = 1;
-        float *compact;
-        ot_s32 d;
-
-        for (d = 0; d < tensor->shape.dim_size; d++) {
-            elems *= (ot_u64)tensor->shape.dims[d];
-        }
-        compact = (float *)malloc((size_t)elems * sizeof(float));
-        if (compact == NULL) {
-            printf("[%s] alloc compact output[%d] fail\n", slot->name, o);
-            free(boxes);
-            return -1;
-        }
-        if (yolo_copy_output(tensor, compact) != 0) {
-            printf("[%s] output[%d] is not F32 [1,H,W,255]\n", slot->name, o);
-            free(compact);
-            free(boxes);
-            return -1;
-        }
-        box_num = yolo_decode_output(compact, tensor->shape.dims[1],
+        box_num = yolo_decode_output(tensor, tensor->shape.dims[1],
                                      tensor->shape.dims[2], masks[o], boxes, box_num);
-        free(compact);
 
         if (save) {
             char path[FILE_PATH_MAX] = {0};
