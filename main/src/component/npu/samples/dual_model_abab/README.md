@@ -20,6 +20,7 @@
 | 模型推理     | `ot_avp_npu_trigger()`                   | 异步触发推理                                                                    |
 | 模型交替调度 | main 中的 A/B 循环                         | trigger A → trigger B → wait A → wait B                                      |
 | 模型后处理   | `model_postprocess()` / `classification_postprocess()` / `print_topk()` / `tiny_yolov3_yuv420sp_postprocess()` | wait 后按模型类型分发：分类输出落盘并打印 top-5，检测输出落盘并做阈值过滤+NMS |
+| 数据传输     | `transfer.c` / `transfer_io.c` / `transfer_zlib.c` / `stream_send_*()` | 走 SSH stdio 的成帧流：序列号同步、magic 重同步、CRC 校验、zlib 压缩、stdin 控制帧接收 |
 | 资源回收     | `model_destroy()`                        | 销毁 dataset/tensor，卸载模型                                                   |
 
 ## 预处理/后处理的挂载点与触发顺序
@@ -74,7 +75,7 @@ make
 命令格式（参数都可选，`output_dir` 尤其可选）：
 
 ```text
-sample_dual_model_abab [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir]
+sample_dual_model_abab [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir] [stream]
 ```
 
 默认值：
@@ -107,6 +108,43 @@ B: ../data/model/classification/mobilenetv2_rgbplanar_b.ortm
 - 多输入模型：`inputX` 传目录，目录内文件命名为 `0`、`1`、`2`…（对应输入索引）。
 - YUV420SP 输入：模型在工具链转换时声明 YUV420SP 输入即可直接喂原始 YUV420SP 文件；需要 RGB/NCHW 时要在此处补转换代码。
 - **性能模式**：不传 `output_dir` 时不保存任何输出文件、也不打印 top-k/检测框，适合 `repeat=10000` 这类大循环基准测试，避免输出把 `/data` 写满。带上 `output_dir` 时输出命名 `A_frameN_out0.bin` / `B_frameN_out0.bin`，F32 分类输出同时打印 top-5，tiny-yolov3 同时打印阈值过滤+NMS 后的检测框。
+- **stream 模式**：第 8 个参数传 `1`（只发结果）或 `2`（同时发输出 tensor）。此时不写 `/data`，stdout 只承载协议帧，日志自动改走 stderr。见下一节。
+
+## SSH 数据流传输（stream 模式）
+
+之前把后处理结果写到 `/data` 分区时容易把磁盘写满（`/data` 约 35MB，tiny-yolov3 两路输出约 861KB/帧）。本模块改为**复用已有的 SSH 通道**把结果实时传回主机，不占用 `/data`；虚拟 USB（RNDIS）继续留给 upgrade 指令等待，不动它。
+
+### 通道与方向
+
+- 板端样例在 SSH 会话内运行：**stdout 只写协议帧**（板端→主机），**stdin 收主机控制帧**（主机→板端，支持 STOP）。SSH 本身提供传输、加密与认证。
+- 主机端用 `host/npu_stream_receiver.py`（Python3，只用标准库）解码流：magic 重同步、CRC 校验、zlib 解压、按 frame 序号查丢帧，并把结果/原始 tensor 落到主机目录。
+
+### 板端→主机结果流
+
+```sh
+ssh root@$BOARD_IP 'cd /data/npu_demo && ./bin/sample_dual_model_abab \
+  /data/npu_demo/model/mobilenetv2_rgbplanar_b.ortm \
+  /data/npu_demo/input/ILSVRC2012_val_00024327.rgb \
+  /data/npu_demo/model/tiny-yolov3_yuv420sp_b.ortm \
+  /data/npu_demo/input/COCO_val2014_000000568213.yuv420sp \
+  1000 /tmp 1' | python3 host/npu_stream_receiver.py -o ./board_out
+```
+
+`stream=1` 每帧发 2 条 RESULT 帧（A 的 top-5 / B 的 NMS 后检测框），`stream=2` 再追加 TENSOR 帧（按行紧凑、zlib 压缩后的原始输出）。主机端产物：
+
+```text
+board_out/stream.json     流元信息（协议版本、模型名/类型、总帧数）
+board_out/results.jsonl   逐帧结果（JSON Lines，方便后续解析）
+board_out/*_frame*.bin    stream=2 时的原始 tensor（与落盘模式同名同内容）
+```
+
+### 数据同步与协议
+
+每帧固定 32 字节头：`magic("NPST") | version | flags | type | model_id | seq | timestamp_us | orig_len | payload_len | crc32`。`seq` 为 frame 序号、`model_id` 区分 A/B，主机据此重组成帧；流首的 SYNC 帧携带协议版本、模型名/类型和总帧数，流中若混入日志行，接收端按 magic 自动重同步；每帧 payload 带 CRC32（与 `binascii.crc32` 同实现），压缩帧置 `flags.compressed` 后由主机 zlib 解压。
+
+### 为什么推荐 SSH 而不是虚拟 USB
+
+虚拟 USB/RNDIS 链路当前被 `upgrade` 指令等待占用，复用它会和升级握手抢通道；SSH 是现成的、已验证的连接方式（部署、传日志本来就用它），零新增端口、零板端常驻服务，断开 SSH 即停止传输。
 
 ## 换成自己的模型要确认的点
 
