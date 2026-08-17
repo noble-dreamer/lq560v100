@@ -14,7 +14,9 @@
 #include "sample_comm.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 #include "ot_scene.h"
 #include "ot_scenecomm.h"
@@ -53,6 +55,7 @@ typedef struct {
     ot_u64            dpts_sum;
     ot_u64            dpts_min;
     ot_u64            dpts_max;
+    ot_bool           det_info_printed;
 } camera_ctx;
 
 static camera_ctx gs_ctx;
@@ -221,6 +224,7 @@ int32_t camera_init(void)
         return ret;
     }
 
+    pthread_mutex_init(&gs_ctx.lock, NULL);
     gs_sys_init = OT_TRUE;
     printf("[camera] media system init ok\n");
     return OT_SUCCESS;
@@ -235,8 +239,11 @@ void camera_deinit(void)
     sample_comm_media_pipe_stop(gs_media_pipe_hdl);
     sample_comm_sys_exit();
     gs_sys_init = OT_FALSE;
+    pthread_mutex_destroy(&gs_ctx.lock);
     printf("[camera] media system exit ok\n");
 }
+
+static void *camera_get_frame_proc(void *p);
 
 static ot_s32 camera_user_pool_create(ot_eis_img_attr *img_attr, ot_eis_handle *pool_hdl)
 {
@@ -381,6 +388,13 @@ int32_t camera_start(void)
         sample_print("camera scene auto start fail, ret:0x%x\n", ret);
         goto bind_fail;
     }
+    gs_ctx.get_run = OT_TRUE;
+    if (pthread_create(&gs_ctx.get_tid, NULL, camera_get_frame_proc, &gs_ctx) != 0) {
+        sample_print("camera get-frame thread create fail\n");
+        gs_ctx.get_run = OT_FALSE;
+        camera_scene_auto_stop();
+        goto bind_fail;
+    }
     gs_ctx.started = OT_TRUE;
     printf("[camera] pipeline up: chn0=960x1280 YVU420SP, chn2=%dx%d YUV420SP frc=30->10\n",
            CAMERA_DET_OUT_W, CAMERA_DET_OUT_H);
@@ -433,4 +447,183 @@ void camera_stop(void)
     }
     gs_ctx.started = OT_FALSE;
     printf("[camera] pipeline stopped\n");
+}
+
+static void camera_record_pair(ot_u64 pts_l, ot_u64 pts_r)
+{
+    ot_u64 dpts = (pts_l > pts_r) ? (pts_l - pts_r) : (pts_r - pts_l);
+
+    pthread_mutex_lock(&gs_ctx.lock);
+    gs_ctx.lr_pairs++;
+    gs_ctx.dpts_sum += dpts;
+    if (gs_ctx.lr_pairs == 1 || dpts < gs_ctx.dpts_min) {
+        gs_ctx.dpts_min = dpts;
+    }
+    if (dpts > gs_ctx.dpts_max) {
+        gs_ctx.dpts_max = dpts;
+    }
+    pthread_mutex_unlock(&gs_ctx.lock);
+}
+
+/* 采集线程：左右原生帧按 PTS 配对统计；检测通道非阻塞取流，单槽缓存
+ * 最新一帧并丢弃积压，推理侧需要时再拷贝。 */
+static void *camera_get_frame_proc(void *p)
+{
+    camera_ctx *ctx = (camera_ctx *)p;
+    ot_eis_handle chn_l = ctx->vp_cfg[0].chn_hdl[0];
+    ot_eis_handle chn_r = ctx->vp_cfg[1].chn_hdl[0];
+    ot_eis_handle chn_d = ctx->vp_cfg[0].chn_hdl[CAMERA_DET_CHN];
+    ot_eis_img_frame img_l = {0};
+    ot_eis_img_frame img_r = {0};
+    ot_eis_img_frame img_d = {0};
+
+    prctl(PR_SET_NAME, "camera-get-frame", 0, 0, 0);
+
+    while (ot_eis_vproc_chn_acquire_frame(chn_l, &img_l, 0) == OT_SUCCESS) {
+        ot_eis_vproc_chn_release_frame(chn_l, &img_l);
+    }
+    while (ot_eis_vproc_chn_acquire_frame(chn_r, &img_r, 0) == OT_SUCCESS) {
+        ot_eis_vproc_chn_release_frame(chn_r, &img_r);
+    }
+
+    while (ctx->get_run == OT_TRUE) {
+        ot_s32 ret = ot_eis_vproc_chn_acquire_frame(chn_l, &img_l, 500);
+
+        if (ret != OT_SUCCESS) {
+            usleep(100 * 1000);
+            continue;
+        }
+        ret = ot_eis_vproc_chn_acquire_frame(chn_r, &img_r, 500);
+        if (ret != OT_SUCCESS) {
+            ot_eis_vproc_chn_release_frame(chn_l, &img_l);
+            continue;
+        }
+
+        camera_record_pair(img_l.pts, img_r.pts);
+        ot_eis_vproc_chn_release_frame(chn_l, &img_l);
+        ot_eis_vproc_chn_release_frame(chn_r, &img_r);
+
+        while (ot_eis_vproc_chn_acquire_frame(chn_d, &img_d, 0) == OT_SUCCESS) {
+            pthread_mutex_lock(&ctx->lock);
+            if (ctx->slot_valid == OT_TRUE) {
+                ot_eis_vproc_chn_release_frame(chn_d, &ctx->slot_frame);
+            }
+            if (ctx->det_info_printed == OT_FALSE) {
+                printf("[camera] det frame %ux%u fmt=%d compress=%d stride=%u/%u\n",
+                       img_d.attr.width, img_d.attr.height, img_d.attr.pixel_fmt,
+                       img_d.attr.compress_mode, img_d.buff.stride[0],
+                       img_d.buff.stride[1]);
+                ctx->det_info_printed = OT_TRUE;
+            }
+            ctx->slot_frame = img_d;
+            ctx->slot_valid = OT_TRUE;
+            ctx->det_frames++;
+            pthread_mutex_unlock(&ctx->lock);
+        }
+    }
+
+    pthread_mutex_lock(&ctx->lock);
+    if (ctx->slot_valid == OT_TRUE) {
+        ot_eis_vproc_chn_release_frame(chn_d, &ctx->slot_frame);
+        ctx->slot_valid = OT_FALSE;
+    }
+    pthread_mutex_unlock(&ctx->lock);
+    return OT_NULL;
+}
+
+static void camera_fill_rows(uint8_t *dst, uint32_t dst_stride, uint32_t rows,
+                             const uint8_t *src, uint32_t src_stride, uint8_t fill)
+{
+    for (uint32_t r = 0; r < rows; r++) {
+        if (src != NULL) {
+            memcpy(dst + (size_t)r * dst_stride, src + (size_t)r * src_stride,
+                   dst_stride);
+        } else {
+            memset(dst + (size_t)r * dst_stride, fill, dst_stride);
+        }
+    }
+}
+
+int32_t camera_copy_latest_to_input(uint8_t *dst, uint32_t dst_len)
+{
+    const uint8_t *y;
+    const uint8_t *uv;
+    uint32_t top_pad = CAMERA_TOP_PAD;
+    uint32_t y_size = CAMERA_NPU_IN_W * CAMERA_NPU_IN_H;
+    int32_t ret = -1;
+
+    if (dst == NULL || dst_len < CAMERA_NPU_IN_LEN) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&gs_ctx.lock);
+    if (gs_ctx.slot_valid != OT_TRUE ||
+        gs_ctx.slot_frame.attr.width != CAMERA_DET_OUT_W ||
+        gs_ctx.slot_frame.attr.height != CAMERA_DET_OUT_H) {
+        goto unlock_out;
+    }
+    y = (const uint8_t *)gs_ctx.slot_frame.buff.virt_addr[0];
+    uv = (const uint8_t *)gs_ctx.slot_frame.buff.virt_addr[1];
+
+    camera_fill_rows(dst, CAMERA_NPU_IN_W, top_pad, NULL, 0, 128);
+    camera_fill_rows(dst + (size_t)top_pad * CAMERA_NPU_IN_W, CAMERA_NPU_IN_W,
+                     CAMERA_DET_OUT_H, y, gs_ctx.slot_frame.buff.stride[0], 128);
+    camera_fill_rows(dst + (size_t)(top_pad + CAMERA_DET_OUT_H) * CAMERA_NPU_IN_W,
+                     CAMERA_NPU_IN_W, top_pad, NULL, 0, 128);
+
+    camera_fill_rows(dst + y_size, CAMERA_NPU_IN_W, top_pad / 2, NULL, 0, 128);
+    camera_fill_rows(dst + y_size + (size_t)(top_pad / 2) * CAMERA_NPU_IN_W,
+                     CAMERA_NPU_IN_W, CAMERA_DET_OUT_H / 2, uv,
+                     gs_ctx.slot_frame.buff.stride[1], 128);
+    camera_fill_rows(dst + y_size + (size_t)(top_pad / 2 + CAMERA_DET_OUT_H / 2) *
+                     CAMERA_NPU_IN_W, CAMERA_NPU_IN_W, top_pad / 2, NULL, 0, 128);
+    ret = 0;
+
+unlock_out:
+    pthread_mutex_unlock(&gs_ctx.lock);
+    return ret;
+}
+
+int32_t camera_get_stats(camera_stats *stats)
+{
+    if (stats == NULL) {
+        return -1;
+    }
+    pthread_mutex_lock(&gs_ctx.lock);
+    stats->det_frames = gs_ctx.det_frames;
+    stats->lr_pairs = gs_ctx.lr_pairs;
+    stats->dpts_min_us = gs_ctx.dpts_min;
+    stats->dpts_avg_us = (gs_ctx.lr_pairs != 0) ? gs_ctx.dpts_sum / gs_ctx.lr_pairs : 0;
+    stats->dpts_max_us = gs_ctx.dpts_max;
+    pthread_mutex_unlock(&gs_ctx.lock);
+    return 0;
+}
+
+int32_t camera_dump_latest(const char *path)
+{
+    uint8_t *buf;
+    FILE *fp;
+    int32_t ret;
+
+    if (path == NULL) {
+        return -1;
+    }
+    buf = (uint8_t *)malloc(CAMERA_NPU_IN_LEN);
+    if (buf == NULL) {
+        return -1;
+    }
+    ret = camera_copy_latest_to_input(buf, CAMERA_NPU_IN_LEN);
+    if (ret == 0) {
+        fp = fopen(path, "wb");
+        if (fp == NULL) {
+            ret = -1;
+        } else {
+            if (fwrite(buf, 1, CAMERA_NPU_IN_LEN, fp) != CAMERA_NPU_IN_LEN) {
+                ret = -1;
+            }
+            fclose(fp);
+        }
+    }
+    free(buf);
+    return ret;
 }
