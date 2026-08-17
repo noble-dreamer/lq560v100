@@ -13,15 +13,15 @@
 
 ## 代码模块
 
-| 模块         | 函数                                       | 说明                                                                            |
-| ------------ | ------------------------------------------ | ------------------------------------------------------------------------------- |
-| 模型初始化   | `model_init()` / `model_prepare_io()`  | 加载模型、查询 IO 信息、分配 tensor、创建 dataset、设置 runtime buffer 和优先级 |
-| 模型预处理   | `model_preprocess()` / `mobilenetv2_rgbplanar_preprocess()` / `tiny_yolov3_yuv420sp_preprocess()` | trigger 前按模型类型分发：RGB planar 按行带 stride 读入，YUV420SP 整块读入，其余退回通用裸数据加载 |
-| 模型推理     | `ot_avp_npu_trigger()`                   | 异步触发推理                                                                    |
-| 模型交替调度 | main 中的 A/B 循环                         | trigger A → trigger B → wait A → wait B                                      |
-| 模型后处理   | `model_postprocess()` / `classification_postprocess()` / `print_topk()` / `tiny_yolov3_yuv420sp_postprocess()` | wait 后按模型类型分发：分类输出落盘并打印 top-5，检测输出落盘并做阈值过滤+NMS |
-| 数据传输     | `transfer.c` / `transfer_io.c` / `transfer_zlib.c` / `stream_send_*()` | 走 SSH stdio 的成帧流：序列号同步、magic 重同步、CRC 校验、zlib 压缩、stdin 控制帧接收 |
-| 资源回收     | `model_destroy()`                        | 销毁 dataset/tensor，卸载模型                                                   |
+| 模块         | 函数                                                                                                                   | 说明                                                                                               |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| 模型初始化   | `model_init()` / `model_prepare_io()`                                                                              | 加载模型、查询 IO 信息、分配 tensor、创建 dataset、设置 runtime buffer 和优先级                    |
+| 模型预处理   | `model_preprocess()` / `mobilenetv2_rgbplanar_preprocess()` / `tiny_yolov3_yuv420sp_preprocess()`                | trigger 前按模型类型分发：RGB planar 按行带 stride 读入，YUV420SP 整块读入，其余退回通用裸数据加载 |
+| 模型推理     | `ot_avp_npu_trigger()`                                                                                               | 异步触发推理                                                                                       |
+| 模型交替调度 | main 中的 A/B 循环                                                                                                     | trigger A → trigger B → wait A → wait B                                                         |
+| 模型后处理   | `model_postprocess()` / `classification_postprocess()` / `print_topk()` / `tiny_yolov3_yuv420sp_postprocess()` | wait 后按模型类型分发：分类输出落盘并打印 top-5，检测输出落盘并做阈值过滤+NMS                      |
+| 数据传输     | `transfer.c` / `transfer_io.c` / `transfer_zlib.c` / `stream_send_*()`                                         | 走 SSH stdio 的成帧流：序列号同步、magic 重同步、CRC 校验、zlib 压缩、stdin 控制帧接收             |
+| 资源回收     | `model_destroy()`                                                                                                    | 销毁 dataset/tensor，卸载模型                                                                      |
 
 ## 预处理/后处理的挂载点与触发顺序
 
@@ -377,7 +377,14 @@ awk -F, 'NR>1{s+=$3;n++} END{if(n) printf "proc-CPU avg=%.1f%% n=%d\n",s/n,n; el
 
 ### 八、评估 2：预处理 + 后处理 + 流式传输（stream=1，10000 次）
 
-这一档在**主机端**跑：推理结果经 SSH 流回主机，板端不落盘，主机接收器同时校验接收质量。把下面脚本存成文件（例如 `host/benchmark_stream.sh`）在样例目录运行，按需改 `BOARD_IP`、`REPEAT`：
+这一档在**主机端**跑：推理结果经 SSH 流回主机，板端不落盘，主机接收器同时校验接收质量。把下面脚本存成文件（例如 `host/benchmark_stream.sh`），在样例目录 `dual_model_abab/` 下执行（脚本里的 `host/npu_stream_receiver.py` 相对路径依赖这个目录），按需改 `BOARD_IP`、`REPEAT`。存好后先加可执行权限，或直接用解释器执行；脚本内部已经以 `root` 账号 ssh 板端，主机侧不需要 `sudo`：
+
+```sh
+chmod +x host/benchmark_stream.sh
+./host/benchmark_stream.sh      # 或 sh host/benchmark_stream.sh
+```
+
+脚本内容：
 
 ```sh
 #!/bin/sh
