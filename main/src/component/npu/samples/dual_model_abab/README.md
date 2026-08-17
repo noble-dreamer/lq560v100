@@ -443,3 +443,22 @@ ssh -T $BOARD_USER@$BOARD_IP "pkill -f 'scripts/(cpu_usage|mem_monitor|proc_cpu)
 说明：第 2 步第 8 个参数 `1` 是 stream 级别（`1`=只发结果，`2`=追加压缩后的输出 tensor），`/tmp` 只是 `output_dir` 占位，流模式下被忽略。`receiver_stderr.log` 末尾的 `stream finished: {1: 1, 2: 20000}` 表示 1 个 SYNC + 20000 条 RESULT；任何日志混流、丢帧或校验失败都会在同一个文件里留下 `resync` / `seq gap` / `crc error` 行。
 
 板端实测参考（同模型同输入，10000 帧）：约 70s；进程 CPU 平均约单核 42%；RSS 稳定约 4.5MB；主机端 20000/20000 条结果、0 次重同步、0 次 CRC 错误、0 次丢帧。相比评估 1 多出的约 6s，约 1.4s 是板端 CPU（分类 top-k 读取 NPU 输出），约 4.5s 是每帧 2 个结果包经过 USB RNDIS→Windows→WSL 链路的固有延迟。若第 8 个参数改成 `2`（加发输出 tensor），瓶颈变为板端 zlib 压缩（673KB tensor 实测约 227ms）与链路带宽，10000 帧约需 57 分钟，仅建议短跑验证时使用。
+
+### 九、相机模式（inputB = camera）
+
+把 B 模型（tiny-yolov3 检测）的输入换成 sc132gs 双目相机，A 模型仍走文件：
+
+```sh
+cd /data/npu_demo
+./bin/sample_dual_model_abab \
+  /data/npu_demo/model/mobilenetv2_rgbplanar_b.ortm \
+  /data/npu_demo/input/ILSVRC2012_val_00024327.rgb \
+  /data/npu_demo/model/tiny-yolov3_yuv420sp_b.ortm \
+  camera 3000 none 1
+```
+
+`camera.c` 启动与 `uvc_app` 相同的 sc132gs 管线（**不创建/绑定 UVC gadget**，USB 保持 RNDIS+ACM）：左/右 vproc 组输出原生 1280x960 帧，左组 chn2 检测通道做中心裁剪 960x1280@(60,0) + 270° 旋转 + 缩放，输出 416x312 YUV420SP、FRC 30→10。由于 omg 把 YUV420SP 原始输入尺寸钉死在 ONNX 头尺寸（416x416，无法直接转出 640x480 输入），416x312 内容按上下各 52 行灰边（Y=UV=128）补成模型要求的 416x416，检测框解码后再按参考 `rescale()` 映射回 640x480 报告，RESULT 流帧追加 `src_w/src_h`。
+
+采集线程只保留最新一帧（单槽，队列上界 1），推理侧拷贝即消费；因此每帧周期跟随 10fps 相机。启动前需把 `param/sc132gs` 放到运行目录（或软链），运行需 `--dump-frame` 可把一帧 NPU 视角的 416x416 快照写到 `/tmp/camera_frame.yuv420sp`（注意该参数要放在 positional 参数之外，否则会被当成 output_dir）。
+
+板端实测（相机模式，stream=1，3000 帧约 5 分钟）：每帧 `duration_us` 平均 99.9ms（冷启动首帧约 37ms，后续稳定约 100ms，无 >150ms 帧）；整机 CPU 平均 13.1%（峰值 53%）；进程 CPU 平均单核 15.2%；RSS 启动后稳定在约 11.8MB，最后 250s 无单调增长；主机端 6000/6000 条结果、0 次重同步/CRC 错误/丢帧；`/data` 与 `/tmp` 占用在运行前后不变。左右原生帧 ΔPTS 平均 0-1μs（硬件主从同步），远小于 16.6ms 容差。跑相机模式前若 `sample_comm_vi_start_vi` 报 `get dev_handle failed`，说明上一次异常退出残留了 VI 句柄，先执行 `/opt/ompmod/load_lq560v100 -a` 重置媒体栈再重跑。
