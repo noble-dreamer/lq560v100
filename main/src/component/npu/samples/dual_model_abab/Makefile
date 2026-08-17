@@ -2,6 +2,8 @@ CUR_DIR=$(shell pwd)
 MAIN_DIR = $(CUR_DIR)/../../../../../
 include $(CUR_DIR)/../sample_cfg.mak
 
+ZLIB_DIR := $(ROOT_DIR)/opensource/zlib/out/board
+
 CUR_SRCS := $(wildcard *.c)
 UTIL_SRCS := $(wildcard $(CUR_DIR)/../sample_utils/*.c)
 TARGET := sample_dual_model_abab
@@ -28,6 +30,7 @@ NPU_LIBS += $(REL_LIB)/libot_avp_npu.a
 
 CFLAGS += -I$(CUR_DIR)/../sample_utils
 CFLAGS += $(COMM_INC)
+CFLAGS += -DNPU_TRANSFER_ZLIB -I$(ZLIB_DIR)/include
 CFLAGS += -g
 CFLAGS += -fPIC -no-pie
 
@@ -35,6 +38,7 @@ CFLAGS += -fPIC -no-pie
 DEP_LIBS += $(SYS_LIBS)
 DEP_LIBS += $(NPU_LIBS)
 DEP_LIBS += $(LIBS_LD_CFLAGS)
+DEP_LIBS += $(ZLIB_DIR)/lib/libz.a
 
 .PHONY : clean all
 
