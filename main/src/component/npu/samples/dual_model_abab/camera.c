@@ -49,6 +49,7 @@ typedef struct {
     ot_bool           started;
     ot_bool           get_run;
     pthread_t         get_tid;
+    ot_eis_handle     det_chn;
     pthread_mutex_t   lock;
     pthread_cond_t    cond;
     ot_bool           slot_valid;
@@ -350,6 +351,7 @@ int32_t camera_start(void)
         goto vp_fail;
     }
     done_vp++;
+    gs_ctx.det_chn = gs_ctx.vp_cfg[0].chn_hdl[CAMERA_DET_CHN];
     ret = sample_comm_start_vproc(&gs_ctx.vp_cfg[1], pipe_sw, chnl_sw_r);
     if (ret != OT_SUCCESS) {
         sample_print("camera vproc R start fail\n");
@@ -605,11 +607,14 @@ int32_t camera_copy_latest_to_input(uint8_t *dst, uint32_t dst_len)
                      gs_ctx.slot_frame.buff.stride[1], 128);
     camera_fill_rows(dst + y_size + (size_t)(top_pad / 2 + CAMERA_DET_OUT_H / 2) *
                      CAMERA_NPU_IN_W, CAMERA_NPU_IN_W, top_pad / 2, NULL, 0, 128);
-    ret = 0;
-
     if (map != NULL) {
         ot_smr_munmap(map, map_size);
     }
+    /* 拷贝即消费：归还当前帧并清空单槽，下一次拷贝等待 10fps 新帧 */
+    ot_eis_vproc_chn_release_frame(gs_ctx.det_chn, &gs_ctx.slot_frame);
+    gs_ctx.slot_valid = OT_FALSE;
+    ret = 0;
+
 unlock_out:
     pthread_mutex_unlock(&gs_ctx.lock);
     return ret;

@@ -1145,6 +1145,18 @@ int main(int argc, char **argv)
 
     printf("benchmark finished, frames run: %u\n", frame);
 
+    if (camera_mode) {
+        camera_stats stats;
+
+        if (camera_get_stats(&stats) == 0) {
+            printf("[camera] stats: det=%u lr_pairs=%u dpts min/avg/max=%llu/%llu/%llu us\n",
+                   stats.det_frames, stats.lr_pairs,
+                   (unsigned long long)stats.dpts_min_us,
+                   (unsigned long long)stats.dpts_avg_us,
+                   (unsigned long long)stats.dpts_max_us);
+        }
+    }
+
 cleanup_models:
     if (camera_mode) {
         camera_stop();
