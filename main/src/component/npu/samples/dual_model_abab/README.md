@@ -127,7 +127,7 @@ mkdir -p /data/npu_demo/scripts /data/npu_demo/logs
 ```sh
 #!/bin/sh
 
-LOG=/data/npu_demo/logs/cpu_usage.csv
+LOG=/data/npu_demo/logs/cpu_usage.log
 mkdir -p /data/npu_demo/logs
 
 prev_total=0
@@ -151,7 +151,9 @@ while true; do
             usage=0
         fi
 
-        echo "$(date +%s),$usage" >> $LOG
+        line="$(date +%s),$usage"
+        echo "$line" >> $LOG
+        echo "$line"
     fi
 
     prev_total=$total
@@ -166,20 +168,14 @@ done
 ```sh
 #!/bin/sh
 
-LOG=/data/npu_demo/logs/mem_usage.csv
+LOG=/data/npu_demo/logs/mem_usage.log
 mkdir -p /data/npu_demo/logs
 
-PID=$(pidof sample_dual_model_abab 2>/dev/null)
-if [ -z "$PID" ]; then
-    PID=$(ps | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
-fi
+PID=$(ps w | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
 
 while [ -z "$PID" ]; do
     sleep 1
-    PID=$(pidof sample_dual_model_abab 2>/dev/null)
-    if [ -z "$PID" ]; then
-        PID=$(ps | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
-    fi
+    PID=$(ps w | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
 done
 
 echo "monitor sample_dual_model_abab PID=$PID"
@@ -191,7 +187,9 @@ while [ -d /proc/$PID ]; do
     avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
     rss=$(awk '/VmRSS/{print $2}' /proc/$PID/status 2>/dev/null)
 
-    echo "$(date +%s),$total,$free,$avail,$rss" >> $LOG
+    line="$(date +%s),$total,$free,$avail,$rss"
+    echo "$line" >> $LOG
+    echo "$line"
 
     sleep 1
 done
@@ -204,20 +202,14 @@ echo "sample_dual_model_abab process finished"
 ```sh
 #!/bin/sh
 
-LOG=/data/npu_demo/logs/proc_cpu.csv
+LOG=/data/npu_demo/logs/proc_cpu.log
 mkdir -p /data/npu_demo/logs
 
-PID=$(pidof sample_dual_model_abab 2>/dev/null)
-if [ -z "$PID" ]; then
-    PID=$(ps | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
-fi
+PID=$(ps w | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
 
 while [ -z "$PID" ]; do
     sleep 1
-    PID=$(pidof sample_dual_model_abab 2>/dev/null)
-    if [ -z "$PID" ]; then
-        PID=$(ps | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
-    fi
+    PID=$(ps w | grep sample_dual_model_abab | grep -v grep | awk '{print $1}' | head -n1)
 done
 
 echo "monitor sample_dual_model_abab PID=$PID"
@@ -248,7 +240,9 @@ while [ -d /proc/$PID ]; do
     if [ "$prev" -gt 0 ]; then
         delta=$((cur-prev))
         cpu=$((delta*100/HZ))
-        echo "$(date +%s),$PID,$cpu" >> $LOG
+        line="$(date +%s),$PID,$cpu"
+        echo "$line" >> $LOG
+        echo "$line"
     fi
     prev=$cur
 done
@@ -298,4 +292,4 @@ kill $CPU_MON $MEM_MON $PROC_MON 2>/dev/null
 echo "benchmark finished"
 ```
 
-结果落在 `/data/npu_demo/logs/`：`cpu_usage.csv` 是整机 CPU，`mem_usage.csv` 是内存与进程 RSS，`proc_cpu.csv` 是样例进程 CPU，`abab.log` 是程序运行日志。测试时注意 `/data` 分区剩余空间（`df -h /data`）；性能模式不写输出文件，10000 次循环只消耗日志空间。
+结果落在 `/data/npu_demo/logs/`：`cpu_usage.log` 是整机 CPU，`mem_usage.log` 是内存与进程 RSS，`proc_cpu.log` 是样例进程 CPU，`abab.log` 是程序运行日志。每个监控脚本把同样的采样行同时写入自己的 `.log` 文件和 `*_console.log`，两个文件都不会为空。测试时注意 `/data` 分区剩余空间（`df -h /data`）；性能模式不写输出文件，10000 次循环只消耗日志空间。
