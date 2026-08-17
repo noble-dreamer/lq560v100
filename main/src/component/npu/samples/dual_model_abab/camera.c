@@ -39,6 +39,27 @@ typedef struct {
 
 static camera_scene_auto_ctx gs_scene;
 
+typedef struct {
+    sample_vi_cfg     vi_cfg[2];
+    sample_vproc_attr vp_cfg[2];
+    ot_bool           started;
+    ot_bool           get_run;
+    pthread_t         get_tid;
+    pthread_mutex_t   lock;
+    ot_bool           slot_valid;
+    ot_eis_img_frame  slot_frame;
+    ot_u32            det_frames;
+    ot_u32            lr_pairs;
+    ot_u64            dpts_sum;
+    ot_u64            dpts_min;
+    ot_u64            dpts_max;
+} camera_ctx;
+
+/* 模块内唯一实例；start/stop 接入前保持外部链接避免 -Werror=unused-variable */
+camera_ctx gs_ctx;
+static ot_bool gs_sys_init = OT_FALSE;
+static ot_eis_handle gs_media_pipe_hdl = OT_NULL;
+
 static void *camera_scene_norm_proc(void *p)
 {
     ot_s32 ret = OT_SUCCESS;
@@ -131,4 +152,89 @@ void camera_scene_auto_stop(void)
         pthread_join(ctx->norm_ctx[i].tid, NULL);
     }
     ot_scene_deinit();
+}
+
+static ot_s32 camera_get_vrb_cfg(ot_u32 pipe_num, ot_u32 width, ot_u32 height,
+                                 ot_video_buffer_attr *buffer_attr)
+{
+    ot_eis_buf_size_calc_cfg calc_cfg;
+    ot_eis_img_attr img_attr;
+
+    if (buffer_attr == OT_NULL) {
+        return -1;
+    }
+
+    buffer_attr->cnt = 2;
+
+    img_attr.width = width;
+    img_attr.height = height;
+    img_attr.bit_depth = OT_EIS_PIXEL_BIT_DEPTH_8;
+    img_attr.pixel_fmt = OT_EIS_IMAGE_FORMAT_BAYER_12BPP;
+    img_attr.compress_mode = OT_EIS_IMAGE_COMPRESS_MODE_NONE;
+    img_attr.layout = OT_EIS_IMAGE_LAYOUT_LINEAR;
+    sample_common_get_pic_buf_cfg(&img_attr, &calc_cfg);
+    buffer_attr->buf_blks[0].size = calc_cfg.blk_size;
+    buffer_attr->buf_blks[0].cnt = pipe_num * 3;
+    strcpy(buffer_attr->buf_blks[0].region_name, "anony");
+
+    img_attr.pixel_fmt = OT_EIS_IMAGE_FORMAT_YVU_420_SEMIPLANAR;
+    sample_common_get_pic_buf_cfg(&img_attr, &calc_cfg);
+    buffer_attr->buf_blks[1].size = calc_cfg.blk_size;
+    buffer_attr->buf_blks[1].cnt = pipe_num * 3;
+    strcpy(buffer_attr->buf_blks[1].region_name, "anony");
+
+    return 0;
+}
+
+int32_t camera_init(void)
+{
+    ot_s32 ret;
+    ot_eis_img_size img_size = {0};
+    ot_video_buffer_attr vrb_cfg;
+
+    sample_comm_vi_get_size_by_sns_type(CAMERA_SNS_TYPE, &img_size);
+    camera_get_vrb_cfg(CAMERA_PIPE_NUM, img_size.width, img_size.height, &vrb_cfg);
+    ret = sample_comm_sys_init(&vrb_cfg);
+    if (ret != OT_SUCCESS) {
+        printf("[camera] sample_comm_sys_init fail, ret=%d\n", ret);
+        return ret;
+    }
+
+    ret = sample_comm_sys_set_vi_vproc_init_cfg(OT_EIS_VI_OFFLINE_VPROC_OFFLINE);
+    if (ret != OT_SUCCESS) {
+        printf("[camera] set vi/vproc offline fail, ret=%d\n", ret);
+        sample_comm_sys_exit();
+        return ret;
+    }
+
+    ret = sample_comm_media_pipe_init(&gs_media_pipe_hdl);
+    if (ret != OT_SUCCESS) {
+        printf("[camera] media pipe init fail, ret=%d\n", ret);
+        sample_comm_sys_exit();
+        return ret;
+    }
+
+    ret = ot_buffer_pool_init();
+    if (ret != OT_SUCCESS && ret != OT_ERR_BUFPOOL_ALREADY_INIT) {
+        printf("[camera] buffer pool init fail, ret=%d\n", ret);
+        sample_comm_media_pipe_stop(gs_media_pipe_hdl);
+        sample_comm_sys_exit();
+        return ret;
+    }
+
+    gs_sys_init = OT_TRUE;
+    printf("[camera] media system init ok\n");
+    return OT_SUCCESS;
+}
+
+void camera_deinit(void)
+{
+    if (gs_sys_init != OT_TRUE) {
+        return;
+    }
+    ot_buffer_pool_deinit();
+    sample_comm_media_pipe_stop(gs_media_pipe_hdl);
+    sample_comm_sys_exit();
+    gs_sys_init = OT_FALSE;
+    printf("[camera] media system exit ok\n");
 }
