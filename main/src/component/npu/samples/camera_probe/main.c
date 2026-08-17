@@ -248,12 +248,200 @@ static void probe_sys_exit(void)
     printf("[probe] media system exit ok\n");
 }
 
+/* 启动 sc132gs 双目管线：VI -> 左/右 vproc chn0（960x1280 裁剪+旋转后的原生
+ * 帧），左组另加 chn2 检测通道（416x312 YUV420SP，FRC 30->10），最后接
+ * scene_auto ISP 调优。全程不触碰 USB gadget。 */
+static ot_s32 probe_startup(void)
+{
+    ot_s32 ret = OT_SUCCESS;
+    ot_s32 i = 0;
+    ot_s32 done_vi = 0;
+    ot_s32 done_pool0 = 0;
+    ot_s32 done_pool2 = 0;
+    ot_s32 done_vp = 0;
+    ot_s32 done_bind = 0;
+    ot_bool pipe_sw[OT_EIS_VPROC_GRP_PIPE_MAX_NUM] = {OT_TRUE, OT_FALSE, OT_FALSE, OT_FALSE};
+    ot_bool chnl_sw_l[OT_EIS_VPROC_GRP_CHN_MAX_NUM] = {OT_TRUE, OT_FALSE, OT_TRUE, OT_FALSE};
+    ot_bool chnl_sw_r[OT_EIS_VPROC_GRP_CHN_MAX_NUM] = {OT_TRUE, OT_FALSE, OT_FALSE, OT_FALSE};
+    ot_eis_handle vi_pipe_hdl[OT_EIS_VI_MAX_PIPE_NUM] = {0};
+    ot_eis_handle vp_grp_hdl[OT_EIS_VI_MAX_PIPE_NUM] = {0};
+
+    if (gs_sys_init != OT_TRUE) {
+        return OT_FAILURE;
+    }
+
+    for (i = 0; i < 2; i++) {
+        ot_s32 dev_id = (i == 0) ? 0 : 2;
+
+        sample_comm_vi_get_default_vi_cfg_by_dev_id(
+            SMS_SC132GS_MIPI_1_5M_30FPS_RAW12_DIRECT_SLAVE, &gs_ctx.vi_cfg[i], dev_id);
+        for (ot_s32 j = 0; j < 2; j++) {
+            gs_ctx.vi_cfg[i].pipe_info[0].pipe_id[j] = 2 * i + j;
+        }
+        ret = sample_comm_vi_start_vi(&gs_ctx.vi_cfg[i]);
+        if (ret != OT_SUCCESS) {
+            sample_print("probe vi start %d fail, ret:0x%x\n", i, ret);
+            goto vi_fail;
+        }
+        gs_ctx.vi_cfg[i].media_pipe_hdl = gs_media_pipe_hdl;
+        done_vi++;
+    }
+
+    for (i = 0; i < 2; i++) {
+        sample_media_vproc_get_default_attr_by_snsor(
+            SMS_SC132GS_MIPI_1_5M_30FPS_RAW12_DIRECT_SLAVE, &gs_ctx.vp_cfg[i]);
+        gs_ctx.vp_cfg[i].chn_attr[0].mode = OT_EIS_VPROC_WORK_MODE_USER;
+        gs_ctx.vp_cfg[i].chn_attr[0].frame_queue_depth = VPROC_FRAME_QUEUE_DEPTH;
+        gs_ctx.vp_cfg[i].chn_attr[0].image_attr.pixel_fmt = OT_EIS_IMAGE_FORMAT_YVU_420_SEMIPLANAR;
+        gs_ctx.vp_cfg[i].chn_attr[0].image_attr.width = 960;
+        gs_ctx.vp_cfg[i].chn_attr[0].image_attr.height = 1280;
+    }
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].mode = OT_EIS_VPROC_WORK_MODE_USER;
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].frame_queue_depth = 2;
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.pixel_fmt = OT_EIS_IMAGE_FORMAT_YUV_420_SEMIPLANAR;
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.width = PROBE_DET_W;
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.height = PROBE_DET_H;
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr.compress_mode = OT_EIS_IMAGE_COMPRESS_MODE_NONE;
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].frc.src_frame_rate = 30;
+    gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].frc.dst_frame_rate = 10;
+
+    for (i = 0; i < 2; i++) {
+        ot_eis_handle pool_hdl = OT_NULL;
+
+        ret = probe_user_pool_create(&gs_ctx.vp_cfg[i].chn_attr[0].image_attr, &pool_hdl);
+        if (ret != OT_SUCCESS) {
+            goto pool_fail;
+        }
+        gs_ctx.vp_cfg[i].chn_attr[0].pool_handle = pool_hdl;
+        done_pool0++;
+    }
+    {
+        ot_eis_handle pool_hdl = OT_NULL;
+
+        ret = probe_user_pool_create(&gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].image_attr,
+                                     &pool_hdl);
+        if (ret != OT_SUCCESS) {
+            goto pool_fail;
+        }
+        gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].pool_handle = pool_hdl;
+        done_pool2++;
+    }
+
+    ret = sample_comm_start_vproc(&gs_ctx.vp_cfg[0], pipe_sw, chnl_sw_l);
+    if (ret != OT_SUCCESS) {
+        sample_print("probe vproc L start fail\n");
+        goto vp_fail;
+    }
+    done_vp++;
+    ret = sample_comm_start_vproc(&gs_ctx.vp_cfg[1], pipe_sw, chnl_sw_r);
+    if (ret != OT_SUCCESS) {
+        sample_print("probe vproc R start fail\n");
+        goto vp_fail;
+    }
+    done_vp++;
+
+    for (i = 0; i < 2; i++) {
+        ot_eis_vproc_chn_rotation ro_param = {0};
+
+        gs_ctx.vp_cfg[i].set_attr.crop_param.enable = OT_TRUE;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_type = OT_EIS_COORD_ABS;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_rect.x = 60;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_rect.y = 0;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_rect.width = 960;
+        gs_ctx.vp_cfg[i].set_attr.crop_param.crop_rect.height = 1280;
+        ot_eis_vproc_grp_set_crop(gs_ctx.vp_cfg[i].grp_hdl,
+                                  &gs_ctx.vp_cfg[i].set_attr.crop_param);
+        ro_param.enable = OT_TRUE;
+        ro_param.angle = OT_EIS_RTT_270;
+        ot_eis_vproc_chn_set_rotation(gs_ctx.vp_cfg[i].chn_hdl[0], &ro_param);
+        if (i == 0) {
+            ot_eis_vproc_chn_set_rotation(gs_ctx.vp_cfg[i].chn_hdl[PROBE_DET_CHN], &ro_param);
+        }
+    }
+
+    for (i = 0; i < 2; i++) {
+        ret = sample_comm_vi_bind_vproc(gs_ctx.vi_cfg[i].pipe_info[0].chn_info.chn_hdl,
+                                        gs_ctx.vp_cfg[i].pipe_hdl[0], gs_media_pipe_hdl);
+        if (ret != OT_SUCCESS) {
+            sample_print("probe vi bind vproc %d fail, ret:0x%x\n", i, ret);
+            goto bind_fail;
+        }
+        done_bind++;
+    }
+
+    for (i = 0; i < 2; i++) {
+        vi_pipe_hdl[i] = gs_ctx.vi_cfg[i].pipe_info[0].pipe_hdl;
+        vp_grp_hdl[i] = gs_ctx.vp_cfg[i].grp_hdl;
+    }
+    ret = probe_scene_auto_start("./param/sc132gs", vi_pipe_hdl, vp_grp_hdl, 2);
+    if (ret != OT_SUCCESS) {
+        sample_print("probe scene auto start fail, ret:0x%x\n", ret);
+        goto bind_fail;
+    }
+
+    gs_ctx.startup = OT_TRUE;
+    printf("[probe] pipeline up: chn0=960x1280 YVU420SP, chn2=%dx%d YUV420SP frc=30->10\n",
+           PROBE_DET_W, PROBE_DET_H);
+    return OT_SUCCESS;
+
+bind_fail:
+    for (i = 0; i < done_bind; i++) {
+        sample_comm_vi_un_bind_vproc(gs_ctx.vi_cfg[i].pipe_info[0].chn_info.chn_hdl,
+                                     gs_ctx.vp_cfg[i].pipe_hdl[0], gs_media_pipe_hdl);
+    }
+vp_fail:
+    for (i = 0; i < done_vp; i++) {
+        sample_comm_stop_vproc(&gs_ctx.vp_cfg[i]);
+    }
+pool_fail:
+    for (i = 0; i < done_pool0; i++) {
+        ot_buffer_pool_destroy(gs_ctx.vp_cfg[i].chn_attr[0].pool_handle);
+    }
+    if (done_pool2 != 0) {
+        ot_buffer_pool_destroy(gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].pool_handle);
+    }
+vi_fail:
+    for (i = 0; i < done_vi; i++) {
+        sample_comm_vi_stop_vi(&gs_ctx.vi_cfg[i]);
+    }
+    return ret;
+}
+
+static void probe_shutdown(void)
+{
+    if (gs_ctx.startup != OT_TRUE) {
+        return;
+    }
+    probe_scene_auto_stop();
+    for (ot_s32 i = 0; i < 2; i++) {
+        sample_comm_vi_un_bind_vproc(gs_ctx.vi_cfg[i].pipe_info[0].chn_info.chn_hdl,
+                                     gs_ctx.vp_cfg[i].pipe_hdl[0], gs_media_pipe_hdl);
+    }
+    for (ot_s32 i = 0; i < 2; i++) {
+        sample_comm_stop_vproc(&gs_ctx.vp_cfg[i]);
+        ot_buffer_pool_destroy(gs_ctx.vp_cfg[i].chn_attr[0].pool_handle);
+    }
+    ot_buffer_pool_destroy(gs_ctx.vp_cfg[0].chn_attr[PROBE_DET_CHN].pool_handle);
+    for (ot_s32 i = 0; i < 2; i++) {
+        sample_comm_vi_stop_vi(&gs_ctx.vi_cfg[i]);
+    }
+    gs_ctx.startup = OT_FALSE;
+    printf("[probe] pipeline stopped\n");
+}
+
 int main(void)
 {
     if (probe_sys_init() != OT_SUCCESS) {
         printf("[probe] init fail\n");
         return -1;
     }
+    if (probe_startup() != OT_SUCCESS) {
+        printf("[probe] startup fail\n");
+        probe_sys_exit();
+        return -1;
+    }
+    sleep(5);
+    probe_shutdown();
     probe_sys_exit();
     return 0;
 }
