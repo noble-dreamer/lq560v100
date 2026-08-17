@@ -118,6 +118,7 @@ main/src/component/media/sample/vi/sample_vi
 main/src/component/media/sample/vo/sample_vo
 main/src/component/media/sample/vproc/sample_vproc
 main/src/component/npu/samples/ortm_run_model/ortm_run_model
+main/src/component/npu/samples/camera_probe/camera_probe
 main/src/component/npu/samples/custom_abs/sample_custom_abs
 main/src/component/npu/samples/dual_model_abab/sample_dual_model_abab
 main/src/component/npu/samples/mobilenetv2_rgbplanar/sample_mobilenetv2

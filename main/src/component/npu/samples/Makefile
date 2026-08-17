@@ -5,6 +5,7 @@ TARGET += "resnet50_binary"
 TARGET += "custom_abs"
 TARGET += "sample_api_user_guide"
 TARGET += "dual_model_abab"
+TARGET += "camera_probe"
 
 $(warning echo "TARGET: $(TARGET)")
 TARGET_CLEAN = $(addsuffix _clean,$(TARGET))
