@@ -42,6 +42,7 @@ typedef struct {
 static void usage(const char *prog)
 {
     printf("Usage: %s [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir]\n", prog);
+    printf("output_dir is optional; omit it to run in perf mode without saving results.\n");
     printf("Defaults:\n  A: %s <- %s\n  B: %s <- %s\n",
            DEFAULT_MODEL_A, DEFAULT_INPUT_A, DEFAULT_MODEL_B, DEFAULT_INPUT_B);
 }
@@ -220,8 +221,6 @@ static ot_s32 model_preprocess(model_slot *slot, const char *input_path)
             goto finish;
         }
     }
-    printf("[%s] preprocess ok: %s\n", slot->name, input_path);
-
 finish:
     for (i = 0; i < slot->input_num; i++) {
         free(files[i]);
@@ -280,9 +279,14 @@ static void print_topk(const char *name, const ot_avp_tensor *tensor, ot_u32 fra
     printf("\n");
 }
 
-static ot_s32 model_postprocess(model_slot *slot, const char *output_dir, ot_u32 frame)
+static ot_s32 model_postprocess(model_slot *slot, const char *output_dir, ot_u32 frame,
+                                bool save)
 {
     ot_u32 i;
+
+    if (!save) {
+        return 0;
+    }
 
     for (i = 0; i < slot->output_num; i++) {
         char path[FILE_PATH_MAX] = {0};
@@ -313,7 +317,8 @@ int main(int argc, char **argv)
     const char *model_b = (argc > 3) ? argv[3] : DEFAULT_MODEL_B;
     const char *input_b = (argc > 4) ? argv[4] : DEFAULT_INPUT_B;
     ot_u32 repeat = (argc > 5) ? (ot_u32)atoi(argv[5]) : 1;
-    const char *output_dir = (argc > 6) ? argv[6] : "./output";
+    const char *output_dir = (argc > 6) ? argv[6] : NULL;
+    bool save_output = (output_dir != NULL);
     model_slot models[MODEL_NUM] = {0};
     ot_avp_npu_config config = {0};
     ot_u32 frame;
@@ -352,7 +357,9 @@ int main(int argc, char **argv)
         goto cleanup_models;
     }
 
-    mkdir_dir((char *)output_dir);
+    if (save_output) {
+        mkdir_dir((char *)output_dir);
+    }
 
     for (frame = 0; frame < repeat; frame++) {
         printf("\n===== frame %u =====\n", frame);
@@ -387,7 +394,7 @@ int main(int argc, char **argv)
             printf("[A] wait fail: %d\n", ret);
             break;
         }
-        ret = model_postprocess(&models[0], output_dir, frame);
+        ret = model_postprocess(&models[0], output_dir, frame, save_output);
         if (ret != 0) {
             break;
         }
@@ -398,11 +405,13 @@ int main(int argc, char **argv)
             printf("[B] wait fail: %d\n", ret);
             break;
         }
-        ret = model_postprocess(&models[1], output_dir, frame);
+        ret = model_postprocess(&models[1], output_dir, frame, save_output);
         if (ret != 0) {
             break;
         }
     }
+
+    printf("benchmark finished, frames run: %u\n", frame);
 
 cleanup_models:
     model_destroy(&models[1]);
