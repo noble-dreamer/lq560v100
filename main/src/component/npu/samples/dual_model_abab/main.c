@@ -5,6 +5,7 @@
  *   sample_dual_model_abab [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir]
  */
 #include "ot_avp_npu_rts.h"
+#include "camera.h"
 #include "file_utils.h"
 #include "transfer.h"
 #include <float.h>
@@ -67,6 +68,8 @@ typedef struct {
 static void usage(const char *prog)
 {
     printf("Usage: %s [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir] [stream]\n", prog);
+    printf("inputB may be \"camera\" to feed model B from the sc132gs detection channel.\n");
+    printf("--dump-frame writes one camera frame to /tmp/camera_frame.yuv420sp (debug).\n");
     printf("output_dir is optional; omit it to run in perf mode without saving results.\n");
     printf("stream: 0=off, 1=send results over SSH stdout, 2=also send output tensors.\n");
     printf("Defaults:\n  A: %s <- %s\n  B: %s <- %s\n",
@@ -914,6 +917,8 @@ int main(int argc, char **argv)
     bool stream_mode = (stream_level > 0);
     bool stream_tensors = (stream_level >= 2);
     bool save_output = (output_dir != NULL) && !stream_mode;
+    bool camera_mode = (strcmp(input_b, "camera") == 0);
+    bool dump_frame = false;
     model_slot models[MODEL_NUM] = {0};
     ot_avp_npu_config config = {0};
     transfer_ctx tx;
@@ -921,15 +926,31 @@ int main(int argc, char **argv)
     ot_u32 frame;
     ot_s32 ret;
 
+    for (ot_s32 a = 1; a < argc; a++) {
+        if (strcmp(argv[a], "--dump-frame") == 0) {
+            dump_frame = true;
+        }
+    }
+
     if (repeat == 0) {
         repeat = 1;
     }
 
 #ifndef SIMULATOR
 #ifndef OT_AVP_NPU_V200
-    ot_eis_media_init();
+    if (camera_mode) {
+        if (camera_init() != 0) {
+            printf("camera init fail\n");
+            ret = -1;
+            goto smr_out;
+        }
+    } else {
+        ot_eis_media_init();
+    }
 #endif
-    ot_smr_init();
+    if (!camera_mode) {
+        ot_smr_init();
+    }
 #endif
 
     config.core_ids = 0;
@@ -967,6 +988,18 @@ int main(int argc, char **argv)
         goto cleanup_models;
     }
 
+    if (camera_mode) {
+        if (models[1].kind != MODEL_KIND_DETECT_YOLOV3) {
+            printf("[B] camera input requires a tiny-yolov3 detection model\n");
+            goto cleanup_models;
+        }
+        ret = camera_start();
+        if (ret != 0) {
+            printf("camera start fail\n");
+            goto cleanup_models;
+        }
+    }
+
     if (stream_mode) {
         ret = stream_send_sync(&tx, &models[0], &models[1], repeat, stream_tensors);
         if (ret != 0) {
@@ -986,12 +1019,32 @@ int main(int argc, char **argv)
             printf("\n===== frame %u =====\n", frame);
         }
 
-        /* 1. 预处理两个模型，输入来自 input 目录 */
+        /* 1. 预处理两个模型；B 在相机模式下从检测通道拷贝最新帧 */
         ret = model_preprocess(&models[0], input_a);
         if (ret != 0) {
             break;
         }
-        ret = model_preprocess(&models[1], input_b);
+        if (camera_mode) {
+            ret = camera_copy_latest_to_input(
+                (uint8_t *)models[1].inputs[0].virt_addr,
+                (uint32_t)models[1].inputs[0].len);
+            if (ret == 0 && dump_frame) {
+                FILE *fp = fopen("/tmp/camera_frame.yuv420sp", "wb");
+
+                if (fp != NULL) {
+                    if (fwrite((const void *)models[1].inputs[0].virt_addr, 1,
+                               models[1].inputs[0].len, fp) !=
+                        models[1].inputs[0].len) {
+                        printf("[camera] dump frame write fail\n");
+                    }
+                    fclose(fp);
+                    printf("[camera] dumped frame to /tmp/camera_frame.yuv420sp\n");
+                }
+                dump_frame = false;
+            }
+        } else {
+            ret = model_preprocess(&models[1], input_b);
+        }
         if (ret != 0) {
             break;
         }
@@ -1056,6 +1109,9 @@ int main(int argc, char **argv)
     printf("benchmark finished, frames run: %u\n", frame);
 
 cleanup_models:
+    if (camera_mode) {
+        camera_stop();
+    }
     model_destroy(&models[1]);
     model_destroy(&models[0]);
 
@@ -1065,10 +1121,14 @@ cleanup_models:
     ot_avp_npu_deinit();
 smr_out:
 #ifndef SIMULATOR
-    ot_smr_deinit();
+    if (camera_mode) {
+        camera_deinit();
+    } else {
+        ot_smr_deinit();
 #ifndef OT_AVP_NPU_V200
-    ot_eis_media_deinit();
+        ot_eis_media_deinit();
 #endif
+    }
 #endif
     return ret;
 }
