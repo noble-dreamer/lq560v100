@@ -16,11 +16,39 @@
 | 模块         | 函数                                       | 说明                                                                            |
 | ------------ | ------------------------------------------ | ------------------------------------------------------------------------------- |
 | 模型初始化   | `model_init()` / `model_prepare_io()`  | 加载模型、查询 IO 信息、分配 tensor、创建 dataset、设置 runtime buffer 和优先级 |
-| 模型预处理   | `model_preprocess()`                     | 从 input 目录读取数据并按模型的 shape/dtype/stride 写入输入 tensor              |
+| 模型预处理   | `model_preprocess()` / `mobilenetv2_rgbplanar_preprocess()` / `tiny_yolov3_yuv420sp_preprocess()` | trigger 前按模型类型分发：RGB planar 按行带 stride 读入，YUV420SP 整块读入，其余退回通用裸数据加载 |
 | 模型推理     | `ot_avp_npu_trigger()`                   | 异步触发推理                                                                    |
 | 模型交替调度 | main 中的 A/B 循环                         | trigger A → trigger B → wait A → wait B                                      |
-| 模型后处理   | `model_postprocess()` / `print_topk()` | 输出落盘；分类型 F32`[1,N]` 输出额外打印 top-5                                |
+| 模型后处理   | `model_postprocess()` / `classification_postprocess()` / `print_topk()` / `tiny_yolov3_yuv420sp_postprocess()` | wait 后按模型类型分发：分类输出落盘并打印 top-5，检测输出落盘并做阈值过滤+NMS |
 | 资源回收     | `model_destroy()`                        | 销毁 dataset/tensor，卸载模型                                                   |
+
+## 预处理/后处理的挂载点与触发顺序
+
+所有改动都在 `main.c`。每个 frame 的执行顺序如下：
+
+```c
+/* 1. trigger 之前：预处理把数据写入 input_tensor[].virt_addr */
+model_preprocess(&models[0], input_a);
+model_preprocess(&models[1], input_b);
+
+/* 2. 触发两个模型 */
+ot_avp_npu_trigger(models[0].handle, ...);
+ot_avp_npu_trigger(models[1].handle, ...);
+
+/* 3. wait 之后：后处理读取 output_tensor[].virt_addr */
+ot_avp_npu_wait(models[0].handle, -1);
+model_postprocess(&models[0], ...);
+ot_avp_npu_wait(models[1].handle, -1);
+model_postprocess(&models[1], ...);
+```
+
+`model_init()` 末尾调用 `model_detect_kind()`，用 API 查询到的输出信息自动区分模型：两路 F32 `[1,H,W,255]` 输出识别为 tiny-yolov3 检测模型，单路 F32 `[1,N]` 输出识别为分类模型，其余按原始数据模型处理。因此不用改 CLI，把 mobilenetv2 和 tiny-yolov3 的路径传进来就会走各自的专用函数。
+
+- `mobilenetv2_rgbplanar_preprocess()`：校验输入为 UINT8 NCHW `[1,3,H,W]`，用 `load_data_from_file()` 按查询到的 stride 逐行写入；resize/crop/mean/std 已固化在离线模型的 Preprocess 节点里，软件侧无需重复做。
+- `tiny_yolov3_yuv420sp_preprocess()`：模型转换时已声明 YUV420SP 输入（内部完成 YUV420SP→RGBPlanar + letterbox），直接把整块 YUV420SP 数据 `fread` 进输入 tensor。
+- `tiny_yolov3_yuv420sp_postprocess()`：把两路 stride 对齐的 `[1,H,W,255]` F32 输出逐行拷到紧凑缓冲，按参考样例 `postProcess()` 做 sigmoid/exp 解码，0.6 目标置信度过滤，按分数降序做 0.2 IoU 的 NMS，最后打印 `class/score/box`。坐标是 416×416 模型输入空间，映射回原图分辨率需要原图宽高，可仿照参考样例的 `rescale()` 补上。
+
+性能模式（不传 `output_dir`）跳过所有落盘和 top-5/检测打印，预处理和 trigger/wait 仍完整执行，保证大循环基准测试不会写满 `/data`。
 
 ## 编译
 
@@ -76,13 +104,13 @@ B: ../data/model/classification/mobilenetv2_rgbplanar_b.ortm
 - 单输入模型：`inputX` 传输入文件路径。
 - 多输入模型：`inputX` 传目录，目录内文件命名为 `0`、`1`、`2`…（对应输入索引）。
 - YUV420SP 输入：模型在工具链转换时声明 YUV420SP 输入即可直接喂原始 YUV420SP 文件；需要 RGB/NCHW 时要在此处补转换代码。
-- **性能模式**：不传 `output_dir` 时不保存任何输出文件、也不打印 top-k，适合 `repeat=10000` 这类大循环基准测试，避免输出把 `/data` 写满。带上 `output_dir` 时输出命名 `A_frameN_out0.bin` / `B_frameN_out0.bin`，F32 分类输出同时打印 top-5。
+- **性能模式**：不传 `output_dir` 时不保存任何输出文件、也不打印 top-k/检测框，适合 `repeat=10000` 这类大循环基准测试，避免输出把 `/data` 写满。带上 `output_dir` 时输出命名 `A_frameN_out0.bin` / `B_frameN_out0.bin`，F32 分类输出同时打印 top-5，tiny-yolov3 同时打印阈值过滤+NMS 后的检测框。
 
 ## 换成自己的模型要确认的点
 
 1. 模型必须是 `*_b.ortm` 板端离线模型；制作参考 `~/npu_toolchain/common/samples`，用 `oritek_model_gen.sh <dir> board` 生成。
 2. 输入文件格式、shape 必须和模型输入一致，否则预处理时用 API 查询到的 shape/stride 拷贝会失败或推理结果无效。
-3. 输出解析：非分类模型请替换 `model_postprocess()` 里的 top-k 逻辑（检测模型需加 NMS）。
+3. 输出解析：分类模型走 `classification_postprocess()` 的 top-k；tiny-yolov3 检测模型走 `tiny_yolov3_yuv420sp_postprocess()` 的阈值过滤+NMS；其他检测模型请按同样的方式在 `model_postprocess()` 里补一个专用分支。
 4. 两个模型优先级默认都设为 MEDIUM；若要改成不同优先级，注意 `trigger+trigger+wait` 组合要求优先级一致。
 
 ## 板端部署
