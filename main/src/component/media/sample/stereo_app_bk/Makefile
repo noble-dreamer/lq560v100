@@ -17,6 +17,7 @@ CUR_SRCS += $(SRC_PATH)/stereo_queue.c
 CUR_SRCS += $(SRC_PATH)/stereo_cve.c
 CUR_SRCS += $(shell if [ -f $(SRC_PATH)/../media_ai/ot_avp_cve_alg_lib.c ]; then echo $(SRC_PATH)/../media_ai/ot_avp_cve_alg_lib.c; fi)
 CUR_SRCS += $(SRC_PATH)/stereo_npu.c
+CUR_SRCS += $(SRC_PATH)/stereo_yolo.c
 CUR_SRCS += $(SRC_PATH)/stereo_subpixel.c
 CUR_SRCS += $(SRC_PATH)/stereo_venc.c
 CUR_SRCS += $(SRC_PATH)/stereo_lz4.c
