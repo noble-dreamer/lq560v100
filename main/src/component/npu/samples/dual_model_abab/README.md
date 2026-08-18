@@ -498,12 +498,13 @@ REPEAT=30 CAMERA_FPS=10 ./host/camera_stream.sh
 样例目录下（WSL2 本机，tkinter/PIL/numpy/paramiko 已就绪）：
 
 ```sh
-python3 host/npu_gui.py                      # 默认 192.168.1.101 / root / 123456 / 10fps
-python3 host/npu_gui.py --fps 20 --password <密码>
-python3 host/npu_gui.py --playback /tmp/stream.bin   # 离线回放录制的流，不连板子
+chmod +x host/run_gui.sh
+./host/run_gui.sh                              # 默认 192.168.1.101 / root / 123456 / 10fps
+BOARD_FPS=20 BOARD_PASSWORD=<密码> ./host/run_gui.sh
+./host/run_gui.sh --playback /tmp/stream.bin   # 离线回放录制的流，不连板子
 ```
 
-CLI：`--host/--user/--password/--fps/--board-dir/--repeat`，模型与输入用 `--model-a/--input-a/--model-b` 覆盖（后续 A 换成立体匹配等模型时只改这几个参数，A 仍走文件输入，相机深度/相机数据留到新模型就绪后接入）。GUI 用 paramiko 开**无 PTY 的原始 SSH 通道**执行板端 `stream=3` 命令，读线程复用 `npu_stream_receiver.iter_frames/parse_result/parse_image`：NV12→RGB（BT.601 full-range）→PIL 缩放到 640×480 画布，按 seq 匹配同帧 detect 结果画绿框（框已是 640×480 源坐标，直接叠加），侧栏显示 seq、duration_ms、接收 fps、图像/重同步/CRC 计数、框数与 A 模型 top-5。渲染节奏跟随 `--fps`，缓存只保留最近 3 个 seq，积压旧帧丢弃防内存增长。
+`host/run_gui.sh` 是 `host/npu_gui.py` 的薄封装：环境变量 `BOARD_IP/BOARD_USER/BOARD_PASSWORD/BOARD_FPS/BOARD_DIR`（默认 `192.168.1.101/root/123456/10//data/npu_demo`），其余命令行参数全部透传；也可直接 `python3 host/npu_gui.py --help` 查看全部 CLI。CLI：`--host/--user/--password/--fps/--board-dir/--repeat`，模型与输入用 `--model-a/--input-a/--model-b` 覆盖（后续 A 换成立体匹配等模型时只改这几个参数，A 仍走文件输入，相机深度/相机数据留到新模型就绪后接入）。GUI 用 paramiko 开**无 PTY 的原始 SSH 通道**执行板端 `stream=3` 命令，读线程复用 `npu_stream_receiver.iter_frames/parse_result/parse_image`：NV12→RGB（BT.601 full-range）→PIL 缩放到 640×480 画布，按 seq 匹配同帧 detect 结果画绿框（框已是 640×480 源坐标，直接叠加），侧栏显示 seq、duration_ms、接收 fps、图像/重同步/CRC 计数、框数与 A 模型 top-5。渲染节奏跟随 `--fps`，缓存只保留最近 3 个 seq，积压旧帧丢弃防内存增长。
 
 关闭窗口或点 STOP：向通道 stdin 写 CONTROL STOP 帧，板端每 8 帧轮询一次（10fps 下最迟约 0.8s），回 ACK 后干净走 `camera_stop→model_destroy→npu_deinit` 退出；GUI 等 EOF 再断开，12s 未 EOF 报错。板端 `main()` 已 `signal(SIGPIPE, SIG_IGN)`：即使 GUI 在板端写流时被硬断开，写 stdout 也只是得到 EPIPE 返回错误、走同一清理路径，不会因 SIGPIPE 被杀掉而遗留失效媒体句柄；若仍见 `get dev_handle failed`，先跑 `/opt/ompmod/load_lq560v100 -a`（不用重启板子）。SSH 传输开 keepalive，异常断开弹窗退出。
 
