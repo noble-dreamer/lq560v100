@@ -18,6 +18,8 @@
 #define STEREO_YOLO_ANCHOR_NUM  (3)
 #define STEREO_YOLO_OBJ_THRESH  (0.6f)
 #define STEREO_YOLO_NMS_THRESH  (0.2f)
+#define STEREO_YOLO_CROP_Y      (60)   /* detection region offset in the left frame */
+#define STEREO_YOLO_CROP_H      (960)  /* detection region height in the left frame */
 
 typedef struct {
     ot_avp_handle        handle;
@@ -396,4 +398,86 @@ ot_u32 stereo_yolo_decode(stereo_yolo_box_t *boxes, ot_u32 max_boxes)
         }
     }
     return kept;
+}
+
+void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
+                           const ot_eis_img_frame *left)
+{
+    const ot_u32 outline = 3;
+    ot_void *map = NULL;
+    ot_u32 map_size;
+    ot_u64 c_off;
+    ot_u8 *y = NULL;
+    ot_u8 *vu = NULL;
+    ot_u32 w;
+    ot_u32 h;
+    ot_u32 sy;
+    ot_u32 suv;
+
+    if (boxes == NULL || box_count == 0 || left == NULL) {
+        return;
+    }
+    w = left->attr.width;
+    h = left->attr.height;
+    if (w == 0 || h == 0) {
+        return;
+    }
+    map_size = left->buff.stride[0] * h + left->buff.stride[1] * h / 2;
+    c_off = left->buff.phys_addr[1] - left->buff.phys_addr[0];
+    if (c_off >= map_size) {
+        return;
+    }
+    if (ot_smr_mmap(left->buff.phys_addr[0], map_size, OT_TRUE, &map) !=
+        OT_SUCCESS) {
+        return;
+    }
+    y  = (ot_u8 *)map;
+    vu = (ot_u8 *)map + c_off;
+    sy  = left->buff.stride[0];
+    suv = left->buff.stride[1];
+
+    for (ot_u32 b = 0; b < box_count; b++) {
+        /* 416-space -> left 1280x1080: content rows 52..363 of the letterbox
+           map to left rows 60..1019 (960 rows). Clamp to the frame. */
+        ot_s32 x1 = (ot_s32)(boxes[b].x1 * w / STEREO_YOLO_INPUT_DIM);
+        ot_s32 x2 = (ot_s32)(boxes[b].x2 * w / STEREO_YOLO_INPUT_DIM);
+        ot_s32 y1 = (ot_s32)(STEREO_YOLO_CROP_Y +
+                     (boxes[b].y1 - STEREO_YOLO_TOP_PAD) * STEREO_YOLO_CROP_H /
+                     STEREO_YOLO_DET_H);
+        ot_s32 y2 = (ot_s32)(STEREO_YOLO_CROP_Y +
+                     (boxes[b].y2 - STEREO_YOLO_TOP_PAD) * STEREO_YOLO_CROP_H /
+                     STEREO_YOLO_DET_H);
+
+        if (x1 < 0) x1 = 0;
+        if (y1 < 0) y1 = 0;
+        if (x2 >= (ot_s32)w) x2 = (ot_s32)w - 1;
+        if (y2 >= (ot_s32)h) y2 = (ot_s32)h - 1;
+        if (x2 < x1 || y2 < y1) {
+            continue;
+        }
+
+        /* Red rectangle outline on Y + chroma, gray chroma inside the box */
+        for (ot_s32 r = y1; r <= y2; r++) {
+            for (ot_s32 c = x1; c <= x2; c++) {
+                ot_bool border =
+                    (r < y1 + (ot_s32)outline || r > y2 - (ot_s32)outline ||
+                     c < x1 + (ot_s32)outline || c > x2 - (ot_s32)outline);
+                ot_u8 *vp = vu + (ot_u32)(r / 2) * suv + (ot_u32)(c / 2) * 2;
+
+                if (border) {
+                    y[(ot_u32)r * sy + (ot_u32)c] = 76;
+                    /* YVU order: V=170, U=90 -> saturated red */
+                    vp[0] = 170;
+                    vp[1] = 90;
+                } else {
+                    vp[0] = 128;
+                    vp[1] = 128;
+                }
+            }
+        }
+    }
+
+    /* Cached mapping: write the CPU-drawn rows back so the VENC DMA sees them */
+    ot_smr_flush_cache(left->buff.phys_addr[0], map, map_size);
+    ot_smr_munmap(map, map_size);
 }
