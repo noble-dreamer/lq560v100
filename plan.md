@@ -52,3 +52,73 @@
 - 双目立体匹配模型接口未知，本期只保留原生左右帧取流与对齐统计，不做深度后处理。
 - 分类模型 A 在立体匹配模型就绪前继续用文件输入，ABAB 结构不拆。
 - 若探测发现 vproc 输出带压缩/tile，先在该通道强制线性无压缩；若模型输入张量不是 640×480，按实际查询值调整通道分辨率或重转模型。
+
+# 3.4 上位机 Demo：SSH 接收 / 解码 / 渲染显示
+
+## 摘要
+
+在 `dual_model_abab` 相机模式基础上新增上位机演示程序：板端把相机画面与检测结果经 SSH stdout 流式发送（新增图像帧类型），WSL2 上位机用 Tkinter+PIL 实时解码并渲染——窗口显示相机画面、目标检测锚框、分类 top-k、帧率/时延/错误统计，关闭窗口或点击 STOP 时经 stdin 控制帧让板端干净退出。不新建端口或服务，完全复用现有 SSH 通道与帧协议。
+
+## 关键决策（已锁定）
+
+- 运行环境：WSL2 本机（tkinter/PIL/numpy/paramiko 已就绪），GUI 用 Tkinter+PIL，不引入 PyQt/cv2。
+- 传输：新增 `TRANSFER_TYPE_IMAGE`（type=7）+ stream 级别 `3 = 结果 + 相机图像`；`2` 仍只表示输出 tensor，语义不回改。图像按原始 NV12 发送、不做 zlib（板端压缩 194KB 约需数十 ms，得不偿失）。
+- 图像内容：发送「模型实际看到的内容」——416×312 有效区（不含上下各 52 行灰边），从 B 模型输入 tensor 直接截取（Y 行 52..363、UV 行 26..181），零额外相机拷贝。
+- 显示：416×312 NV12 → RGB → 缩放 640×480；检测框已在 640×480 源坐标系（RESULT 附 src_w/src_h），直接按 640×480 画布叠加。
+- 时序/内存：主机侧单帧队列（容量 2，丢弃旧帧防积压）；渲染节奏跟随相机帧率，默认 `camera_fps=10`。
+- 生命周期：GUI 内用 paramiko 开 SSH 通道（`makefile("rb")` 读取、原始通道无 PTY）；关闭窗口先发 CONTROL STOP 再断开。
+
+## 实现改动
+
+### 板端（修改 transfer.h + main.c）
+
+- `transfer.h`：`TRANSFER_TYPE_IMAGE = 0x07`。
+- `main.c`：解析 `stream_level >= 3` 为 `stream_image`（仅相机模式生效）；新增 `stream_send_image(tx, &models[1], frame)`：`model_id=2`、`seq=frame`，payload = `kind u8(1=NV12) + pad u8×3 + width u32 + height u32 + 416*312*3/2 原始 NV12`，`compress=false`；在 `camera_copy_latest_to_input` 成功后立即发送（保证图像与同 seq 结果对应）。
+- 复用静态/栈缓冲避免每帧 malloc；发送失败按现有流错误路径退出。
+- 现有 stream=0/1/2 与 `camera_stream.sh` 行为完全不变。
+
+### 主机端（修改 host/npu_stream_receiver.py + 新增 host/npu_gui.py）
+
+- 接收器：新增 `T_IMAGE=7`、`parse_image(payload)`（返回 w/h/nv12），并加 `--save-frames` 调试开关把图像帧落盘 `.yuv420sp`，供无 GUI 验证。
+- GUI `npu_gui.py`（Tkinter+PIL+numpy+paramiko，跨步提交保持 ≤200 行/步）：
+  - CLI：`--host/--user/--password/--fps/--board-dir`，默认 192.168.1.101/root/123456/10/`/data/npu_demo`；构造板端命令 `sample_dual_model_abab <A模型> <A输入> <B模型> camera <repeat=1000000> none 3 <fps>`。
+  - 读线程：复用 `npu_stream_receiver.iter_frames/parse_result/parse_image`；NV12→RGB（numpy 平面拆分+上采样+矩阵转换）→ PIL 缩放 640×480 → 放入丢旧队列。
+  - 渲染线程（`root.after`）：画布显示图像；按 seq 匹配的 detect RESULT 画锚框（`class=<id> score=` 文本）；侧栏显示 seq、duration_ms、接收 fps、A 模型 top-5、CRC/resync 计数。
+  - 控制：STOP 按钮/窗口关闭 → 编码 CONTROL STOP 帧写入通道 stdin → 等待板端退出 → 关闭通道；板端残留（崩溃）时提示执行 `/opt/ompmod/load_lq560v100 -a`。
+  - 错误处理：resync/CRC 计数展示不中断；SSH 断开弹窗退出。
+
+### 文档
+
+- `plan.md` 新增本章节。
+- README「九、相机模式」补上位机用法与实测数据。
+
+## 接口 / 协议变更
+
+- 新帧类型：`type=7`（IMAGE），payload 前 12 字节 `[kind=1, pad×3, w u32, h u32]` + `w*h*3/2` NV12（416×312=194,688B），不压缩、不落盘。
+- stream 级别：`0` 关、`1` 结果、`2` 结果+输出张量、`3` 结果+相机图像（相机模式）；`3` 不自动包含张量。
+- 主机 CLI：`python3 host/npu_gui.py [--fps N] [--password P]`；`npu_stream_receiver.py --save-frames`。
+
+## 里程碑（每步 ≤200 行、≤5 文件、编译/验证后提交）
+
+1. 将本章写入 `/home/lzx/lq560v100_sdk/plan.md`（本步）。
+2. 板端 IMAGE 帧 + stream=3：transfer.h 枚举 + main.c `stream_send_image`，交叉编译通过。
+3. 接收器 `parse_image` + `--save-frames`：板端 stream=3 跑 30 帧，核对帧大小/CRC/seq。
+4. 上位机 `npu_gui.py`：接收→NV12 解码→渲染 + 锚框 + STOP；WSLg 实弹验证。
+5. README 上位机小节 + 10/20/30fps 带宽/资源实测数据落盘。
+
+## 测试计划
+
+- 协议级：用已有 `/tmp/camera_frame.yuv420sp`（416×416 含灰边）构造合成 IMAGE+RESULT 帧离线注入，验证 NV12 解码、灰边剔除、640×480 缩放、锚框像素坐标正确。
+- 板端→主机 CLI：`stream=3` + `--save-frames` 跑 30 帧，核对每帧 194,700B、CRC=0、seq 连续、图像统计量（亮区/灰边）符合相机画面。
+- GUI 实时：WSLg 弹窗显示 ~10fps 流畅画面；有目标时锚框位置/尺寸与 results.jsonl 数值一致；关闭窗口后板端进程退出、SSH 会话结束、UDC 保持 configured。
+- 带宽：10/20/30fps 三档实测主机接收帧率与板端 CPU（应仅多 ~0.3ms/帧拷贝），记录到 README；30fps 若 RNDIS 带宽吃紧则以 10/20 为推荐档。
+- 回归：stream=1/2、`camera_stream.sh`、文件输入模式运行结果不受影响。
+
+## 假设与默认
+
+- 上位机默认在本 WSL2 运行；Windows 原生运行留作后续（代码仅依赖 stdlib+paramiko+PIL，可移植）。
+- 相机当前画面低对比度、可能无检测目标：锚框正确性以合成帧测试为准，实景出框由用户对准目标后确认。
+- v1 锚框文本用 `class id + score`，不内置 COCO 80 类名称；标签映射作为后续增强。
+- 板端 `repeat` 用大值（1000000）+ STOP 控制实现「长跑直到关闭」，不新增无限循环模式。
+- 本章按已落地的 416×312 实现（3.3 早期的 640×480 假设已按实际模型输入调整为 416×312+灰边）编写。
+- skill 的 `references/camera-npu-pipeline.md` 同步更新作为后续可选步骤。
