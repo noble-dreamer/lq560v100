@@ -13,7 +13,7 @@ MAGIC_INT = 0x5453504E
 HDR = struct.Struct("<I BBBB I Q I I I")
 HEADER_SIZE = HDR.size
 
-T_SYNC, T_RESULT, T_TENSOR = 1, 2, 3
+T_SYNC, T_RESULT, T_TENSOR, T_IMAGE = 1, 2, 3, 7
 KIND_CLASSIFY, KIND_DETECT = 1, 2
 FLAG_COMPRESSED = 0x01
 TYPE_NAME = {
@@ -23,6 +23,7 @@ TYPE_NAME = {
     4: "ack",
     5: "control",
     6: "error",
+    T_IMAGE: "image",
 }
 
 def log(*args):
@@ -126,12 +127,22 @@ def parse_tensor(payload):
     return {"index": tensor_index, "dtype": dtype, "dims": list(dims),
             "stride": stride, "data": payload[40:]}
 
+
+def parse_image(payload):
+    """Decode a type=7 camera image frame: kind + pad3 + w u32 + h u32 + NV12."""
+    kind = payload[0]
+    width, height = struct.unpack_from("<II", payload, 4)
+    return {"kind": kind, "w": width, "h": height, "nv12": payload[12:]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("-o", "--outdir", default="npu_stream_out",
                         help="host output directory (default: npu_stream_out)")
     parser.add_argument("--no-tensors", action="store_true",
                         help="do not write tensor payloads to disk")
+    parser.add_argument("--save-frames", action="store_true",
+                        help="write camera image payloads as .yuv420sp files")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="suppress per-result stdout lines (for benchmarks)")
     args = parser.parse_args()
@@ -197,6 +208,16 @@ def main():
                         tensor_file.write(tensor["data"])
                     log("tensor: wrote %s (%d bytes, dims=%s)"
                         % (name, len(tensor["data"]), tensor["dims"]))
+                continue
+
+            if ftype == T_IMAGE:
+                image = parse_image(payload)
+                if args.save_frames:
+                    name = "%s_frame%04d.yuv420sp" % (model_name, seq)
+                    with open(os.path.join(args.outdir, name), "wb") as image_file:
+                        image_file.write(image["nv12"])
+                    log("image: wrote %s (%dx%d, %d bytes nv12)"
+                        % (name, image["w"], image["h"], len(image["nv12"])))
                 continue
 
             log("%s: model=%s seq=%d len=%d" % (type_name, model_name, seq, len(payload)))
