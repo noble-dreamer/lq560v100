@@ -49,7 +49,8 @@ ot_u32 stereo_yolo_decode(stereo_yolo_box_t *boxes, ot_u32 max_boxes);
 /* Map 416x416 boxes to the 1280x1080 left frame (x*1280/416,
  * y=60+(y-52)*960/312, clamped) and draw a colored rectangle outline on the
  * Y/UV planes: the frame is USER-mode, so it is mapped via ot_smr_mmap and
- * the box interior chroma is filled with 128. */
+ * the box interior chroma is filled with 128. A "CLASS_NAME SCORE" label
+ * (5x7 bitmap font, dark background) is drawn at each box top-left. */
 void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
                            const ot_eis_img_frame *left);
 

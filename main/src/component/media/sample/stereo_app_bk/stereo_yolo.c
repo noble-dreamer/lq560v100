@@ -20,6 +20,7 @@
 #define STEREO_YOLO_NMS_THRESH  (0.2f)
 #define STEREO_YOLO_CROP_Y      (60)   /* detection region offset in the left frame */
 #define STEREO_YOLO_CROP_H      (960)  /* detection region height in the left frame */
+#define STEREO_YOLO_FONT_SCALE  (2)    /* 5x7 glyph -> 10x14 px */
 
 typedef struct {
     ot_avp_handle        handle;
@@ -400,6 +401,133 @@ ot_u32 stereo_yolo_decode(stereo_yolo_box_t *boxes, ot_u32 max_boxes)
     return kept;
 }
 
+/* COCO 80 class names (uppercase for the 5x7 bitmap font) */
+static const char *const stereo_yolo_class_names[STEREO_YOLO_CLASS_NUM] = {
+    "PERSON", "BICYCLE", "CAR", "MOTORCYCLE", "AIRPLANE", "BUS", "TRAIN",
+    "TRUCK", "BOAT", "TRAFFIC LIGHT", "FIRE HYDRANT", "STOP SIGN",
+    "PARKING METER", "BENCH", "BIRD", "CAT", "DOG", "HORSE", "SHEEP", "COW",
+    "ELEPHANT", "BEAR", "ZEBRA", "GIRAFFE", "BACKPACK", "UMBRELLA",
+    "HANDBAG", "TIE", "SUITCASE", "FRISBEE", "SKIS", "SNOWBOARD",
+    "SPORTS BALL", "KITE", "BASEBALL BAT", "BASEBALL GLOVE", "SKATEBOARD",
+    "SURFBOARD", "TENNIS RACKET", "BOTTLE", "WINE GLASS", "CUP", "FORK",
+    "KNIFE", "SPOON", "BOWL", "BANANA", "APPLE", "SANDWICH", "ORANGE",
+    "BROCCOLI", "CARROT", "HOT DOG", "PIZZA", "DONUT", "CAKE", "CHAIR",
+    "COUCH", "POTTED PLANT", "BED", "DINING TABLE", "TOILET", "TV",
+    "LAPTOP", "MOUSE", "REMOTE", "KEYBOARD", "CELL PHONE", "MICROWAVE",
+    "OVEN", "TOASTER", "SINK", "REFRIGERATOR", "BOOK", "CLOCK", "VASE",
+    "SCISSORS", "TEDDY BEAR", "HAIR DRIER", "TOOTHBRUSH",
+};
+
+/* 5x7 bitmap font, LSB-aligned rows: A-Z, 0-9, '.', ' ' */
+static const ot_u8 stereo_yolo_font[38][7] = {
+    {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, /* A */
+    {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, /* B */
+    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}, /* C */
+    {0x1C,0x12,0x11,0x11,0x11,0x12,0x1C}, /* D */
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}, /* E */
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, /* F */
+    {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F}, /* G */
+    {0x11,0x11,0x11,0x1F,0x11,0x11,0x11}, /* H */
+    {0x1F,0x04,0x04,0x04,0x04,0x04,0x1F}, /* I */
+    {0x07,0x02,0x02,0x02,0x12,0x12,0x0C}, /* J */
+    {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, /* K */
+    {0x10,0x10,0x10,0x10,0x10,0x10,0x1F}, /* L */
+    {0x11,0x1B,0x15,0x15,0x11,0x11,0x11}, /* M */
+    {0x11,0x19,0x15,0x13,0x11,0x11,0x11}, /* N */
+    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, /* O */
+    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}, /* P */
+    {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}, /* Q */
+    {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, /* R */
+    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}, /* S */
+    {0x1F,0x04,0x04,0x04,0x04,0x04,0x04}, /* T */
+    {0x11,0x11,0x11,0x11,0x11,0x11,0x0E}, /* U */
+    {0x11,0x11,0x11,0x11,0x11,0x0A,0x04}, /* V */
+    {0x11,0x11,0x11,0x15,0x15,0x15,0x0A}, /* W */
+    {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, /* X */
+    {0x11,0x11,0x0A,0x04,0x04,0x04,0x04}, /* Y */
+    {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, /* Z */
+    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, /* 0 */
+    {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, /* 1 */
+    {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, /* 2 */
+    {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E}, /* 3 */
+    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, /* 4 */
+    {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, /* 5 */
+    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, /* 6 */
+    {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, /* 7 */
+    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, /* 8 */
+    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, /* 9 */
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C}, /* . */
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* space */
+};
+
+static const ot_u8 *stereo_yolo_glyph(char ch)
+{
+    if (ch >= 'A' && ch <= 'Z') {
+        return stereo_yolo_font[ch - 'A'];
+    }
+    if (ch >= '0' && ch <= '9') {
+        return stereo_yolo_font[26 + ch - '0'];
+    }
+    if (ch == '.') {
+        return stereo_yolo_font[36];
+    }
+    return stereo_yolo_font[37]; /* space for unknown chars */
+}
+
+/* Dark background + white scaled glyphs on the Y plane; neutral chroma. */
+static void stereo_yolo_draw_label(ot_u8 *y, ot_u8 *vu, ot_u32 sy, ot_u32 suv,
+                                   ot_s32 x0, ot_s32 y0, const char *text,
+                                   ot_u32 w, ot_u32 h)
+{
+    const ot_u32 scale = STEREO_YOLO_FONT_SCALE;
+    const ot_u32 cw = 6 * scale;       /* 5px glyph + 1px gap */
+    const ot_u32 th = 7 * scale + 2 * scale;
+    ot_u32 tw = (ot_u32)strlen(text) * cw + scale;
+    ot_s32 bx = x0;
+    ot_s32 by = y0;
+
+    if (bx + (ot_s32)tw >= (ot_s32)w) {
+        bx = (ot_s32)w - (ot_s32)tw - 1;
+    }
+    if (bx < 0) {
+        bx = 0;
+    }
+    if (by + (ot_s32)th >= (ot_s32)h) {
+        by = (ot_s32)h - (ot_s32)th - 1;
+    }
+    if (by < 0) {
+        by = 0;
+    }
+
+    for (ot_s32 r = by; r < by + (ot_s32)th; r++) {
+        for (ot_s32 c = bx; c < bx + (ot_s32)tw; c++) {
+            ot_u8 *vp = vu + (ot_u32)(r / 2) * suv + (ot_u32)(c / 2) * 2;
+            y[(ot_u32)r * sy + (ot_u32)c] = 16;
+            vp[0] = 128;
+            vp[1] = 128;
+        }
+    }
+
+    for (ot_u32 i = 0; text[i] != '\0'; i++) {
+        const ot_u8 *g = stereo_yolo_glyph(text[i]);
+        ot_s32 gx = bx + (ot_s32)(i * cw + scale);
+        for (ot_u32 row = 0; row < 7; row++) {
+            for (ot_u32 col = 0; col < 5; col++) {
+                if (!(g[row] & (1u << (4 - col)))) {
+                    continue;
+                }
+                for (ot_u32 dy = 0; dy < scale; dy++) {
+                    for (ot_u32 dx = 0; dx < scale; dx++) {
+                        ot_s32 px = gx + (ot_s32)(col * scale + dx);
+                        ot_s32 py = by + (ot_s32)(scale + row * scale + dy);
+                        y[(ot_u32)py * sy + (ot_u32)px] = 255;
+                    }
+                }
+            }
+        }
+    }
+}
+
 void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
                            const ot_eis_img_frame *left)
 {
@@ -474,6 +602,24 @@ void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
                     vp[1] = 128;
                 }
             }
+        }
+
+        /* Class name + confidence at the box top-left (below the top edge
+           when the box is flush against the frame top) */
+        {
+            const char *name =
+                (boxes[b].class_id < STEREO_YOLO_CLASS_NUM)
+                    ? stereo_yolo_class_names[boxes[b].class_id] : "OBJECT";
+            ot_s32 lh = (ot_s32)(7 * STEREO_YOLO_FONT_SCALE +
+                                 2 * STEREO_YOLO_FONT_SCALE);
+            ot_s32 ly = y1 - lh - 2;
+            char label[48];
+
+            if (ly < 2) {
+                ly = y1 + 2;
+            }
+            snprintf(label, sizeof(label), "%s %.2f", name, boxes[b].score);
+            stereo_yolo_draw_label(y, vu, sy, suv, x1, ly, label, w, h);
         }
     }
 
