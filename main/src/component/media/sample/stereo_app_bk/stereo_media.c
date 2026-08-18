@@ -1057,11 +1057,14 @@ static void *stereo_npu_proc(void *p)
         ot_u32 disp_size = 0;
         ot_u32 buf_set_idx = 0;
 
+        /* Async two-phase: trigger, then wait (M3c adds the yolo trigger between). */
         PERF_START(npu);
-        ot_s32 ret = stereo_npu_infer(&npu_in->left_crop, &npu_in->right_crop,
-                                       &cost_data, &cost_size,
-                                       &disp_data, &disp_size,
-                                       &buf_set_idx);
+        ot_s32 ret = stereo_npu_trigger(&npu_in->left_crop, &npu_in->right_crop);
+        if (ret == OT_SUCCESS) {
+            ret = stereo_npu_wait(&cost_data, &cost_size,
+                                  &disp_data, &disp_size,
+                                  &buf_set_idx);
+        }
         PERF_END(npu, npu_ms);
 
         if (ret != OT_SUCCESS || !disp_data) {

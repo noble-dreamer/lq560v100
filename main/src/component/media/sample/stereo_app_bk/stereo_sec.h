@@ -23,16 +23,12 @@ extern "C" {
 ot_s32 stereo_sec_check_device(void);
 
 /**
- * @brief Load and decrypt the encrypted ORTM model file into memory.
- *        Reads /data/model/stereo_match.ortm.enc (= IV[16B] + ciphertext),
- *        derives the AES-128 key from HMAC-SHA256(uid, MASTER_KEY)[:16],
- *        and decrypts via on-chip AES-CTR-128 hardware.
- *
- * @param[out] model_buf  Pointer to decrypted model memory (malloc'd, caller frees).
- * @param[out] model_len  Decrypted model length in bytes.
+ * @brief Decrypt /data/model/stereo_match.ortm.enc into a plaintext staging
+ *        file (async NPU cannot run models loaded from memory).
+ * @param[in] out_path  Output plaintext path (caller deletes it after load)
  * @return OT_SUCCESS on success, error code otherwise.
  */
-ot_s32 stereo_sec_load_decrypt_model(ot_u8 **model_buf, ot_u32 *model_len);
+ot_s32 stereo_sec_decrypt_model_to_file(const char *out_path);
 
 /**
  * @brief Get the board unique ID as a hex string (48 chars for 24 bytes).

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "stereo_npu.h"
 #include "stereo_sec.h"
 #include "ot_smr.h"
@@ -53,6 +54,9 @@ ot_s32 stereo_npu_init(void)
 
     memset(ctx, 0, sizeof(*ctx));
     memset(&config, 0, sizeof(config));
+    /* Async trigger/wait requires thread_num > 0. */
+    config.log_level = 2;
+    config.thread_num = 2;
 
     ret = ot_avp_npu_init(&config);
     if (ret != OT_SUCCESS) {
@@ -60,22 +64,30 @@ ot_s32 stereo_npu_init(void)
         return ret;
     }
 
-    /* Load stereo matching model — decrypt from encrypted file to memory, then load */
-    ot_u8 *model_buf = NULL;
-    ot_u32 model_len = 0;
-    ret = stereo_sec_load_decrypt_model(&model_buf, &model_len);
+    /* load_model_from_mem models hang async wait; stage plaintext as a file
+       and delete it right after the load consumes it. */
+    ret = stereo_sec_decrypt_model_to_file(STEREO_NPU_PLAINTEXT_PATH);
     if (ret != OT_SUCCESS) {
-        stereo_log_write("[stereo_npu] stereo_sec_load_decrypt_model failed, ret:0x%x\n", ret);
+        stereo_log_write("[stereo_npu] decrypt model to file failed, ret:0x%x\n", ret);
         goto npu_deinit;
     }
 
-    ret = ot_avp_npu_load_model_from_mem(model_buf, model_len, &ctx->model_hdl);
-    /* Free plaintext model buffer — NPU has copied what it needs */
-    free(model_buf);
-    model_buf = NULL;
+    ret = ot_avp_npu_load_model(STEREO_NPU_PLAINTEXT_PATH, &ctx->model_hdl);
+    unlink(STEREO_NPU_PLAINTEXT_PATH);
     if (ret != OT_SUCCESS) {
-        stereo_log_write("[stereo_npu] load_model_from_mem failed, ret:0x%x\n", ret);
+        stereo_log_write("[stereo_npu] load model failed, ret:0x%x\n", ret);
         goto npu_deinit;
+    }
+
+    /* Explicit MEDIUM priority + preemption, matching the dual-model sample. */
+    ot_avp_npu_mdl_config mdl_cfg = {
+        .priority_level = OT_AVP_MDL_PRI_MEDIUM,
+        .priority_preemp = true,
+    };
+    ret = ot_avp_npu_set_model_config(ctx->model_hdl, &mdl_cfg);
+    if (ret != OT_SUCCESS) {
+        /* Keep the default priority; treat as a warning like the sample does. */
+        stereo_log_write("[stereo_npu] set config fail (warning), ret:0x%x\n", ret);
     }
 
     /* Query IO counts */
@@ -100,7 +112,7 @@ ot_s32 stereo_npu_init(void)
                 ctx->output_buffsize[i] = ot_avp_npu_get_output_size_by_index(ctx->model_hdl, i);
             }
 
-            /* Allocate cached SMR buffer for output */
+            /* Allocate cached SMR buffer for output (fast A55 reads) */
             ot_smr_alloc_attr smr_attr;
             memset(&smr_attr, 0, sizeof(smr_attr));
             snprintf((char *)smr_attr.region_name, OT_SMR_REGION_NAME_LEN_MAX, "anony");
@@ -211,32 +223,19 @@ void stereo_npu_deinit(void)
     stereo_log_write("[stereo_npu] deinit done\n");
 }
 
-/* -------------------------------------------------------------------------- */
-/* Run inference: directly bind CVE output buffer to NPU input via set_buffer.
-   CVE buffers are ot_smr_alloc'd — already have valid virt/phys addresses.
-   Raw uint8 RGB data is fed to NPU; the model's Preprocess node handles subtract-128.
-   Single-output: returns float32 disparity directly (cost_data=NULL, cost_size=0).
-   Dual-output: returns pointers to cost volume and integer disparity in-place. */
-/* -------------------------------------------------------------------------- */
+/* Bind CVE output phys addrs as NPU inputs, then trigger async inference. */
 
-ot_s32 stereo_npu_infer(const ot_avp_cve_img *left_crop,
-                         const ot_avp_cve_img *right_crop,
-                         void **cost_data, ot_u32 *cost_size,
-                         void **disp_data, ot_u32 *disp_size,
-                         ot_u32 *buf_set_idx)
+ot_s32 stereo_npu_trigger(const ot_avp_cve_img *left_crop,
+                          const ot_avp_cve_img *right_crop)
 {
     ot_s32 ret;
     stereo_npu_ctx_t *ctx = &g_npu_ctx;
 
-    if (!left_crop || !right_crop || !cost_data || !disp_data || !buf_set_idx) {
+    if (!left_crop || !right_crop) {
         return OT_FAILURE;
     }
 
-    /* Serial mode always writes into set 0. SubPixel consumes the output before
-       the next inference starts, so no buffer-set wait or in-use flag is needed. */
-    ot_u32 cur_set = 0;
-
-    /* Bind CVE output buffers directly to NPU input dataset. */
+    /* Bind CVE output buffers directly to NPU input dataset (zero-copy). */
     ret = ot_avp_npu_set_buffer(ctx->input_dataset, 0,
                                  (ot_u8 *)(uintptr_t)left_crop->virt_addr[0],
                                  (ot_u64)left_crop->phys_addr[0],
@@ -257,12 +256,39 @@ ot_s32 stereo_npu_infer(const ot_avp_cve_img *left_crop,
         }
     }
 
-    /* Execute inference using current buffer set */
-    ret = ot_avp_npu_execute(ctx->model_hdl, ctx->input_dataset, ctx->output_dataset[cur_set]);
+    ret = ot_avp_npu_trigger(ctx->model_hdl, ctx->input_dataset,
+                             ctx->output_dataset[0]);
     if (ret != OT_SUCCESS) {
-        stereo_log_write("[stereo_npu] execute failed, ret:0x%x\n", ret);
+        stereo_log_write("[stereo_npu] trigger failed, ret:0x%x\n", ret);
         return ret;
     }
+
+    return ret;
+}
+
+/* Wait for the pending inference and hand out output pointers. */
+
+ot_s32 stereo_npu_wait(void **cost_data, ot_u32 *cost_size,
+                       void **disp_data, ot_u32 *disp_size,
+                       ot_u32 *buf_set_idx)
+{
+    ot_s32 ret;
+    stereo_npu_ctx_t *ctx = &g_npu_ctx;
+
+    if (!cost_data || !cost_size || !disp_data || !disp_size || !buf_set_idx) {
+        return OT_FAILURE;
+    }
+
+    ret = ot_avp_npu_wait(ctx->model_hdl, -1);
+    if (ret != OT_SUCCESS) {
+        stereo_log_write("[stereo_npu] wait failed, ret:0x%x\n", ret);
+        return ret;
+    }
+
+    /* Serial mode always writes into set 0. SubPixel consumes the output
+       before the next trigger, so no buffer-set wait or in-use flag is
+       needed. */
+    ot_u32 cur_set = 0;
 
     /* Invalidate CPU cache for output buffers so CPU sees fresh NPU DMA data.
        ot_smr_flush_cache on ARM does clean+invalidate (DC CIVAC). */

@@ -253,20 +253,18 @@ klad_destroy:
     return ret;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Public: load and decrypt encrypted model file                              */
-/* -------------------------------------------------------------------------- */
-ot_s32 stereo_sec_load_decrypt_model(ot_u8 **model_buf, ot_u32 *model_len)
+/* Decrypt the encrypted model to a plaintext file (async NPU cannot run
+   models loaded from memory, so the plaintext must be a file). */
+ot_s32 stereo_sec_decrypt_model_to_file(const char *out_path)
 {
     ot_s32 ret;
     ot_u8 hmac_digest[STEREO_SEC_HMAC_SIZE];
     ot_u8 aes_key[STEREO_SEC_AES_KEY_SIZE];
     ot_u8 iv[STEREO_SEC_IV_SIZE];
     FILE *fp = NULL;
+    FILE *fp_out = NULL;
     long file_size;
     ot_u32 enc_data_len;
-    ot_u8 *enc_data = NULL;
-    ot_u8 *dec_data = NULL;
 
     /* Cipher handles and buffers */
     ot_crypto_handle symc_handle = 0;
@@ -281,11 +279,9 @@ ot_s32 stereo_sec_load_decrypt_model(ot_u8 **model_buf, ot_u32 *model_len)
     void *dst_virt = NULL;
     ot_smr_alloc_attr smr_attr;
 
-    if (model_buf == NULL || model_len == NULL) {
+    if (out_path == NULL) {
         return OT_FAILURE;
     }
-    *model_buf = NULL;
-    *model_len = 0;
 
     /* Step 1: Derive AES key from HMAC-SHA256(uid, MASTER_KEY)[:16] */
     ret = stereo_sec_compute_hmac(hmac_digest);
@@ -321,22 +317,6 @@ ot_s32 stereo_sec_load_decrypt_model(ot_u8 **model_buf, ot_u32 *model_len)
         return OT_FAILURE;
     }
 
-    /* Read encrypted data */
-    enc_data = (ot_u8 *)malloc(enc_data_len);
-    if (enc_data == NULL) {
-        stereo_log_write("[stereo_sec] malloc enc_data failed\n");
-        fclose(fp);
-        return OT_FAILURE;
-    }
-
-    if (fread(enc_data, 1, enc_data_len, fp) != enc_data_len) {
-        stereo_log_write("[stereo_sec] failed to read ciphertext\n");
-        ret = OT_FAILURE;
-        goto free_enc;
-    }
-    fclose(fp);
-    fp = NULL;
-
     stereo_log_write("[stereo_sec] encrypted model: %u bytes ciphertext + 16B IV\n", enc_data_len);
 
     /* Step 3: Allocate SMR buffers for cipher hardware DMA */
@@ -350,7 +330,7 @@ ot_s32 stereo_sec_load_decrypt_model(ot_u8 **model_buf, ot_u32 *model_len)
     ret = ot_smr_alloc(&smr_attr, &src_phys, &src_virt);
     if (ret != OT_SUCCESS) {
         stereo_log_write("[stereo_sec] smr_alloc src failed, ret:0x%x\n", ret);
-        goto free_enc;
+        goto close_fp;
     }
 
     snprintf((char *)smr_attr.chunk_name, OT_SMR_CHUNK_NAME_MAX, "sec_dst");
@@ -360,10 +340,14 @@ ot_s32 stereo_sec_load_decrypt_model(ot_u8 **model_buf, ot_u32 *model_len)
         goto free_src_smr;
     }
 
-    /* Copy ciphertext to SMR src buffer */
-    memcpy(src_virt, enc_data, enc_data_len);
-    free(enc_data);
-    enc_data = NULL;
+    /* Read ciphertext directly into the SMR source buffer (no heap staging) */
+    if (fread(src_virt, 1, enc_data_len, fp) != enc_data_len) {
+        stereo_log_write("[stereo_sec] failed to read ciphertext\n");
+        ret = OT_FAILURE;
+        goto free_src_smr;
+    }
+    fclose(fp);
+    fp = NULL;
 
     /* Step 4: Setup AES-CTR-128 cipher with clear key */
     ret = ot_omi_cipher_symc_init();
@@ -438,20 +422,25 @@ ot_s32 stereo_sec_load_decrypt_model(ot_u8 **model_buf, ot_u32 *model_len)
         goto keyslot_destroy;
     }
 
-    /* Step 6: Copy decrypted model to malloc'd buffer (caller will free) */
-    dec_data = (ot_u8 *)malloc(enc_data_len);
-    if (dec_data == NULL) {
-        stereo_log_write("[stereo_sec] malloc dec_data failed\n");
+    /* Step 6: Write decrypted model to the plaintext staging file */
+    fp_out = fopen(out_path, "wb");
+    if (fp_out == NULL) {
+        stereo_log_write("[stereo_sec] open plaintext out failed: %s\n", out_path);
         ret = OT_FAILURE;
         goto keyslot_destroy;
     }
-    memcpy(dec_data, dst_virt, enc_data_len);
+    if (fwrite(dst_virt, 1, enc_data_len, fp_out) != enc_data_len) {
+        stereo_log_write("[stereo_sec] write plaintext out failed\n");
+        ret = OT_FAILURE;
+        goto close_fp_out;
+    }
+    fclose(fp_out);
+    fp_out = NULL;
 
-    *model_buf = dec_data;
-    *model_len = enc_data_len;
+    stereo_log_write("[stereo_sec] model decrypted to %s: %u bytes\n", out_path, enc_data_len);
 
-    stereo_log_write("[stereo_sec] model decrypted: %u bytes\n", enc_data_len);
-
+close_fp_out:
+    if (fp_out != NULL) fclose(fp_out);
 keyslot_destroy:
     ot_omi_keyslot_destroy(keyslot_handle);
 symc_destroy:
@@ -464,8 +453,7 @@ free_dst_smr:
     if (dst_phys != 0) ot_smr_free(dst_phys);
 free_src_smr:
     if (src_phys != 0) ot_smr_free(src_phys);
-free_enc:
-    if (enc_data) free(enc_data);
+close_fp:
     if (fp) fclose(fp);
     return ret;
 }

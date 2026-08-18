@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 #define STEREO_NPU_MODEL_PATH   "/data/model/stereo_match.ortm"
+#define STEREO_NPU_PLAINTEXT_PATH "/tmp/stereo_plain.ortm"
 #define STEREO_NPU_MAX_INPUT    2
 #define STEREO_NPU_MAX_OUTPUT   2
 
@@ -32,25 +33,25 @@ ot_s32 stereo_npu_init(void);
 void stereo_npu_deinit(void);
 
 /**
- * @brief Run stereo matching inference (dual-output model) in serial mode.
- *        Zero-copy: directly binds CVE output phys addrs as NPU inputs.
- *        A single NPU output buffer set is reused only after synchronous
- *        SubPixel processing in the same pipeline stage finishes.
- *
- * @param left_crop    Left CVE 640x448 RGB888 planar image (raw uint8)
- * @param right_crop   Right CVE 640x448 RGB888 planar image (raw uint8)
- * @param cost_data    [out] Pointer to cost volume in NPU buffer
- * @param cost_size    [out] Cost volume total bytes
- * @param disp_data    [out] Pointer to integer disparity (uint8) in NPU buffer
- * @param disp_size    [out] Integer disparity total bytes
- * @param buf_set_idx  [out] Compatibility output, always 0 in serial mode
- * @return OT_SUCCESS or failure code.
+ * @brief Async inference in two phases: stereo_npu_trigger() binds the CVE
+ *        output phys addrs as NPU inputs and starts inference;
+ *        stereo_npu_wait() blocks until done and hands out the output
+ *        pointers (cost_data is NULL for single-output F32 models).
+ *        SubPixel must consume the outputs before the next trigger.
+ * @param left_crop    Left CVE 640x448 RGB888 planar image
+ * @param right_crop   Right CVE 640x448 RGB888 planar image
+ * @param cost_data    [out] Cost volume pointer
+ * @param cost_size    [out] Cost volume bytes
+ * @param disp_data    [out] Disparity pointer
+ * @param disp_size    [out] Disparity bytes
+ * @param buf_set_idx  [out] Compatibility output, always 0
+ * @return OT_SUCCESS or failure code
  */
-ot_s32 stereo_npu_infer(const ot_avp_cve_img *left_crop,
-                         const ot_avp_cve_img *right_crop,
-                         void **cost_data, ot_u32 *cost_size,
-                         void **disp_data, ot_u32 *disp_size,
-                         ot_u32 *buf_set_idx);
+ot_s32 stereo_npu_trigger(const ot_avp_cve_img *left_crop,
+                          const ot_avp_cve_img *right_crop);
+ot_s32 stereo_npu_wait(void **cost_data, ot_u32 *cost_size,
+                       void **disp_data, ot_u32 *disp_size,
+                       ot_u32 *buf_set_idx);
 
 /**
  * @brief Compatibility hook for the previous double-buffer pipeline.
