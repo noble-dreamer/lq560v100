@@ -198,6 +198,16 @@
 - OOM → 停止并汇报实测数字，不进入 M3。
 - 提示：/tmp 是 tmpfs（占 RAM），stereo 明文 28MB + 输出 dump ~10MB 会让 RAM 偏紧；若 OOM 可先复跑一次 perf 模式（不带 output_dir）区分「dump 写 tmpfs」与「双模型共驻」的占用，把两组数字一并汇报。
 
+#### M2 实测结果（2026-08-18，板端 101MB RAM，已通过，不触发 OOM 停止）
+
+- 部署：binary（5.1MB）→ `/opt/dual_probe_bin`（flash）；stereo 明文 28MB + tiny-yolov3 9MB + 合成输入 1.7MB → `/tmp`（tmpfs 50.7MB）；yolo 输入复用板端 `/data/npu_demo/input/COCO_val2014_000000568213.yuv420sp`。多输入目录命名必须带后缀（`0.bin`/`1.bin`），无后缀会报 `invalid file suffix`。
+- 加载：两模型同时加载成功，`repeat=1` 落盘与 `repeat=300` perf 模式均跑完，进程无 OOM。
+- **实测模型 I/O（与计划假设不符，以运行时查询为准）**：stereo = 2 输入（640×448 RGB planar UINT8）+ **1 输出 F32 [224,320]**（286,720B，单输出视差，非 cost+disp 双输出）；yolo = 1 输入 + 2 输出 `[1,26,26,255]`+`[1,13,13,255]` F32。
+- 合成对校验：disp 输出 320×224 空间 mean=12.05 / median=12.06，即输入 640×448 空间的 24px（输出为半分辨率）；输入顺序、模型内减 128、视差符号/值域全部正确。yolo 在 COCO 图上检出 3 框（class0 0.972/0.923、class29 0.632）。
+- 内存：推理稳态 RSS ≈1.6–2.4MB（NPU 张量在驱动内存，不计入进程 RSS）；模型加载期 VmPeak ≈127MB（28MB 文件映射为主）、MemAvailable 短暂触底 0 后经 page cache 回收恢复，未 OOM；加载前后 free ≈10.5MB→11MB（tmpfs 占 37MB 基线）。
+- 调度：ABAB 串行约 63–70ms/帧（stereo 推理主导），与本计划 M3 的异步化改造预期一致。
+- 结论：M2 先决门通过，继续 M3；生产部署时 yolo 落 `/data`（flash），避免 tmpfs 占 RAM。
+
 ### M3 NPU 异步化 + yolo 模块骨架（分 a/b/c 提交，每步 ≤5 文件）
 
 - a) `stereo_npu.c/h`：改 trigger/wait 分段接口，init 的 `thread_num=2`；`stereo_media.c` npu 线程先改为 trigger(stereo)→wait(stereo)+SubPixel（3 文件）。验证 stereo 原链路 19fps 不退化后提交。
