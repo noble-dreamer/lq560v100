@@ -96,10 +96,8 @@ static ot_bool                   g_raw_only_mode   = OT_FALSE;
 static volatile ot_bool          g_get_frm_run      = OT_FALSE;
 static volatile ot_bool          g_cve_run           = OT_FALSE;
 static volatile ot_bool          g_npu_run           = OT_FALSE;
-/* tiny-yolov3 state: enabled when the model loads; the detection-channel
-   producer (M4) sets g_det_frame_valid when a fresh frame is available. */
+/* tiny-yolov3 state: enabled when the model loads */
 static volatile ot_bool          g_yolo_enabled      = OT_FALSE;
-static volatile ot_bool          g_det_frame_valid   = OT_FALSE;
 static stereo_yolo_box_t         g_yolo_boxes[STEREO_YOLO_MAX_BOX];
 static volatile ot_bool          g_venc_run          = OT_FALSE;
 static volatile ot_bool          g_net_run           = OT_FALSE;
@@ -900,6 +898,26 @@ void stereo_media_shutdown(void)
 /* get_frame thread: acquire L+R VPROC ch0 frames                             */
 /* -------------------------------------------------------------------------- */
 
+/* Non-blocking: if a fresh detection frame is in the slot, letterbox it into
+   the yolo input and consume the slot. The producer refills at 10fps, so the
+   19fps stereo loop triggers yolo roughly every other iteration and is never
+   throttled by the detection rate. */
+static ot_s32 stereo_det_copy_latest(void)
+{
+    ot_s32 ret = OT_FAILURE;
+
+    pthread_mutex_lock(&g_det_lock);
+    if (g_det_slot_valid == OT_TRUE) {
+        if (stereo_yolo_preprocess(&g_det_slot_frame) == OT_SUCCESS) {
+            ret = OT_SUCCESS;
+        }
+        ot_eis_vproc_chn_release_frame(g_vproc_ctx.det_chn, &g_det_slot_frame);
+        g_det_slot_valid = OT_FALSE;
+    }
+    pthread_mutex_unlock(&g_det_lock);
+    return ret;
+}
+
 /* Detection thread: drain chn2 backlog, then keep ONLY the newest 416x312
    frame in a single slot (mutex + condvar; the consumer copies and releases,
    i.e. copying consumes the slot). Mirrors camera.c's get-frame discipline. */
@@ -1198,15 +1216,19 @@ static void *stereo_npu_proc(void *p)
         ot_u32 disp_size = 0;
         ot_u32 buf_set_idx = 0;
 
-        /* ABAB: trigger stereo, then yolo (only when a fresh detection frame
-           is available), then wait stereo and finish with yolo. */
+        /* ABAB: preprocess yolo from the newest detection frame, trigger
+           stereo, trigger yolo, wait stereo, finish with yolo. */
         ot_bool det_ready = OT_FALSE;
+        if (g_yolo_enabled == OT_TRUE) {
+            det_ready = (stereo_det_copy_latest() == OT_SUCCESS);
+        }
 
         PERF_START(npu);
         ot_s32 ret = stereo_npu_trigger(&npu_in->left_crop, &npu_in->right_crop);
-        if (ret == OT_SUCCESS && g_yolo_enabled == OT_TRUE &&
-            g_det_frame_valid == OT_TRUE) {
-            det_ready = (stereo_yolo_trigger() == OT_SUCCESS);
+        if (ret == OT_SUCCESS && det_ready) {
+            if (stereo_yolo_trigger() != OT_SUCCESS) {
+                det_ready = OT_FALSE;
+            }
         }
         if (ret == OT_SUCCESS) {
             ret = stereo_npu_wait(&cost_data, &cost_size,
@@ -1218,7 +1240,6 @@ static void *stereo_npu_proc(void *p)
         if (ret != OT_SUCCESS || !disp_data) {
             if (det_ready) {
                 stereo_yolo_wait();
-                g_det_frame_valid = OT_FALSE;
             }
             STEREO_LOG("npu_infer failed, ret:0x%x, dropping frame\n", ret);
             ot_eis_vproc_chn_release_frame(npu_in->left_chn_hdl,  &npu_in->left_full);
@@ -1336,7 +1357,6 @@ static void *stereo_npu_proc(void *p)
             if (yret == OT_SUCCESS) {
                 (void)stereo_yolo_decode(g_yolo_boxes, STEREO_YOLO_MAX_BOX);
             }
-            g_det_frame_valid = OT_FALSE;
         }
 
         /* Push to VENC queue — drop if full to avoid blocking NPU thread */

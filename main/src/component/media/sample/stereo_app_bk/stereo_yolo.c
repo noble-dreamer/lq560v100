@@ -12,6 +12,7 @@
 #include "stereo_yolo.h"
 #include "stereo_types.h"
 #include "ot_avp_npu_rts.h"
+#include "ot_smr.h"
 
 #define STEREO_YOLO_CLASS_NUM   (80)
 #define STEREO_YOLO_ANCHOR_NUM  (3)
@@ -163,9 +164,31 @@ void stereo_yolo_deinit(void)
     g_yolo_inited = OT_FALSE;
 }
 
-ot_s32 stereo_yolo_preprocess(const ot_u8 *yuv420sp)
+static void stereo_yolo_fill_rows(ot_u8 *dst, ot_u32 dst_stride, ot_u32 rows,
+                                  const ot_u8 *src, ot_u32 src_stride, ot_u8 fill)
 {
-    if (!g_yolo_inited || yuv420sp == NULL) {
+    for (ot_u32 r = 0; r < rows; r++) {
+        if (src != NULL) {
+            memcpy(dst + (size_t)r * dst_stride, src + (size_t)r * src_stride,
+                   dst_stride);
+        } else {
+            memset(dst + (size_t)r * dst_stride, fill, dst_stride);
+        }
+    }
+}
+
+ot_s32 stereo_yolo_preprocess(const ot_eis_img_frame *frame)
+{
+    const ot_u8 *y = NULL;
+    const ot_u8 *uv = NULL;
+    ot_void *map = NULL;
+    ot_u32 map_size;
+    ot_u64 c_off;
+    ot_u8 *dst;
+    ot_u32 top_pad = STEREO_YOLO_TOP_PAD;
+    ot_u32 y_size = STEREO_YOLO_INPUT_DIM * STEREO_YOLO_INPUT_DIM;
+
+    if (!g_yolo_inited || frame == NULL) {
         return OT_FAILURE;
     }
     if (g_yolo.input.dtype != OT_AVP_DTYPE_UINT8 ||
@@ -174,7 +197,45 @@ ot_s32 stereo_yolo_preprocess(const ot_u8 *yuv420sp)
                          g_yolo.input.dtype, (unsigned long long)g_yolo.input.len);
         return OT_FAILURE;
     }
-    memcpy((ot_u8 *)g_yolo.input.virt_addr, yuv420sp, STEREO_YOLO_INPUT_BYTES);
+    if (frame->attr.width != STEREO_YOLO_DET_W ||
+        frame->attr.height != STEREO_YOLO_DET_H) {
+        return OT_FAILURE;
+    }
+
+    map_size = frame->buff.stride[0] * frame->attr.height +
+               frame->buff.stride[1] * frame->attr.height / 2;
+    c_off = frame->buff.phys_addr[1] - frame->buff.phys_addr[0];
+    if (c_off >= map_size) {
+        return OT_FAILURE;
+    }
+    if (ot_smr_mmap(frame->buff.phys_addr[0], map_size, OT_TRUE, &map) !=
+        OT_SUCCESS) {
+        return OT_FAILURE;
+    }
+    y  = (const ot_u8 *)map;
+    uv = y + c_off;
+    dst = (ot_u8 *)g_yolo.input.virt_addr;
+
+    /* Y plane: 52 gray rows, 312 content rows, 52 gray rows */
+    stereo_yolo_fill_rows(dst, STEREO_YOLO_INPUT_DIM, top_pad, NULL, 0, 128);
+    stereo_yolo_fill_rows(dst + (size_t)top_pad * STEREO_YOLO_INPUT_DIM,
+                          STEREO_YOLO_INPUT_DIM, STEREO_YOLO_DET_H, y,
+                          frame->buff.stride[0], 128);
+    stereo_yolo_fill_rows(dst + (size_t)(top_pad + STEREO_YOLO_DET_H) *
+                          STEREO_YOLO_INPUT_DIM, STEREO_YOLO_INPUT_DIM,
+                          top_pad, NULL, 0, 128);
+
+    /* UV plane: 26 gray rows, 156 content rows, 26 gray rows */
+    stereo_yolo_fill_rows(dst + y_size, STEREO_YOLO_INPUT_DIM, top_pad / 2,
+                          NULL, 0, 128);
+    stereo_yolo_fill_rows(dst + y_size + (size_t)(top_pad / 2) *
+                          STEREO_YOLO_INPUT_DIM, STEREO_YOLO_INPUT_DIM,
+                          STEREO_YOLO_DET_H / 2, uv, frame->buff.stride[1], 128);
+    stereo_yolo_fill_rows(dst + y_size + (size_t)(top_pad / 2 +
+                          STEREO_YOLO_DET_H / 2) * STEREO_YOLO_INPUT_DIM,
+                          STEREO_YOLO_INPUT_DIM, top_pad / 2, NULL, 0, 128);
+
+    ot_smr_munmap(map, map_size);
     return OT_SUCCESS;
 }
 
