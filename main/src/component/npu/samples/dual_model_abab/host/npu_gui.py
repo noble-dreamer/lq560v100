@@ -56,7 +56,11 @@ class GuiApp:
         self.root = root
         self.args = args
         self.lock = threading.Lock()
-        self.latest = None    # (seq, rgb ndarray)
+        self.frames = {}    # seq -> {image: rgb, detect: [...], topk: [...]}
+        self.stats = {"images": 0, "resync": 0, "crc": 0}
+        self.image_times = []
+        self.last_seq = None
+        self.last_duration_ms = None
         self.stopping = False
         self.stop_sent_at = None
         self.eof = False
@@ -109,14 +113,31 @@ class GuiApp:
     def reader(self, stream):
         try:
             for frame in nsr.iter_frames(stream):
-                if frame[0] in ("resync", "crc_error"):
+                if frame[0] == "resync":
+                    with self.lock:
+                        self.stats["resync"] += 1
+                    continue
+                if frame[0] == "crc_error":
+                    with self.lock:
+                        self.stats["crc"] += 1
                     continue
                 _version, _flags, ftype, _model, seq, _ts, payload = frame
                 if ftype == nsr.T_IMAGE:
                     image = nsr.parse_image(payload)
                     rgb = nv12_to_rgb(image["w"], image["h"], image["nv12"])
                     with self.lock:
-                        self.latest = (seq, rgb)
+                        self.frames.setdefault(seq, {})["image"] = rgb
+                        self.stats["images"] += 1
+                        self.image_times.append(time.monotonic())
+                elif ftype == nsr.T_RESULT:
+                    kind, duration_us, entries, _sw, _sh = nsr.parse_result(payload)
+                    with self.lock:
+                        slot = self.frames.setdefault(seq, {})
+                        if kind == "detect":
+                            slot["detect"] = entries
+                            self.last_duration_ms = round(duration_us / 1000.0, 1)
+                        else:
+                            slot["topk"] = entries
         except Exception as exc:
             self.error = str(exc)
         finally:
@@ -125,6 +146,12 @@ class GuiApp:
                 stream.close()
             except Exception:
                 pass
+
+    def prune(self, seq):
+        keep = [s for s in sorted(self.frames) if s > seq - 3]
+        for s in list(self.frames):
+            if s not in keep:
+                del self.frames[s]
 
     def tick(self):
         if self.eof or self.error:
@@ -135,19 +162,52 @@ class GuiApp:
             self.finish()
             return
         with self.lock:
-            latest = self.latest
-        if latest is not None and latest[0] != self.photo_seq:
-            self.render(latest)
-        self.info.set("seq: %s" % (latest[0] if latest else "-"))
+            complete = [s for s, slot in self.frames.items()
+                        if "image" in slot and "detect" in slot]
+            seq = max(complete) if complete else None
+            if seq is None and self.frames:
+                seq = max(self.frames)
+            slot = self.frames.get(seq, {}) if seq is not None else {}
+            self.last_seq = seq
+            if seq is not None:
+                self.prune(seq)
+            image = slot.get("image")
+            boxes = slot.get("detect", [])
+            topk = slot.get("topk", [])
+        if image is not None:
+            self.render(seq, image, boxes)
+        self.update_info(boxes, topk)
         self.root.after(max(20, 1000 // max(1, self.args.fps)), self.tick)
 
-    def render(self, latest):
-        seq, rgb = latest
+    def render(self, seq, rgb, boxes):
+        if seq == self.photo_seq:
+            return
         image = Image.fromarray(rgb).resize((DISPLAY_W, DISPLAY_H), Image.BILINEAR)
         self.photo = ImageTk.PhotoImage(image)
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self.photo)
+        for x1, y1, x2, y2, score, class_id in boxes:
+            self.canvas.create_rectangle(x1, y1, x2, y2, outline="#00ff00", width=2)
+            self.canvas.create_text(x1 + 2, max(2.0, y1 - 14), anchor="nw",
+                                    fill="#00ff00",
+                                    text="class=%d score=%.2f" % (class_id, score))
         self.photo_seq = seq
+
+    def update_info(self, boxes, topk):
+        now = time.monotonic()
+        with self.lock:
+            self.image_times = [t for t in self.image_times if now - t <= 1.0]
+            lines = [
+                "seq: %s" % (self.last_seq if self.last_seq is not None else "-"),
+                "duration_ms: %s" % self.last_duration_ms,
+                "receive_fps: %d" % len(self.image_times),
+                "images: %d" % self.stats["images"],
+                "resync: %d  crc: %d" % (self.stats["resync"], self.stats["crc"]),
+                "boxes: %d" % len(boxes),
+                "A top-5: %s" % ", ".join(
+                    "%d(%.3f)" % (idx, score) for idx, score in topk),
+            ]
+        self.info.set("\n".join(lines))
 
     def request_stop(self):
         if self.stopping:
