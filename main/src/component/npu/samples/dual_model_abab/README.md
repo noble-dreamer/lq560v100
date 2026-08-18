@@ -625,3 +625,68 @@ sshpass -p 123456 ssh root@192.168.1.101 \
 - VPROC chn 级 crop 在 **chn 缩放之后**生效：先把全幅 1080×1280 缩到竖版 352×416，再 crop (20,0,312,416) 等效源空间 960×1280@x=60；crop 坐标写源空间会得到 416×252 的错误输出。
 - 检测通道 attr 竖版 312×416（270° 旋转交换宽高、height 16 对齐）、compress_mode=NONE；FRC 按实际传感器速率写 src=30、dst=10（本 app 名义 20fps 但实测出帧 ~30fps，src=20 会得到 15fps）。
 - 左帧是 YVU420SP（fmt 221），UV 行 stride=1280（字节），chroma 偏移 = `phys_addr[1]-phys_addr[0]`；USER 帧画框后必须 `ot_smr_flush_cache` 写回，否则 VENC DMA 读不到。
+
+### 十一、固件 img、烧录表与新相机部署
+
+#### 固件版本与升级包内容
+
+固件与烧录资产在 `main/pub/lq560plusv100_image_glibc/`。当前最新升级包是 `upgrade_0x01000300.img`（内部 `fw_version=0x01000300`），实测解析其组件表只有 4 项，且各自落在烧录表对应分区上：
+
+| 组件 | 目标分区 | 偏移/大小 |
+| ---- | -------- | --------- |
+| uboot | uboot | 0x200000 / 1M |
+| bl31  | bl31  | 0x300000 / 512K |
+| kernel | kernel | 0x380000 / 8M |
+| rootfs | rootfs | 0xB80000 / 8M |
+
+也就是说 **img 升级只动「uboot + bl31 + kernel + rootfs」四块启动/系统分区，不含 userfs（/opt）和 data（/data）**。本项目的 stereo_app、双模型、标定、license、模型加密文件全部放在 /opt 和 /data 里，是靠 scp 单独部署的，与这个 img 无关；「所有软件修改都是基于 img」这句话要理解为：img 提供底层系统，我们的改动是上层文件，不改 img。
+
+#### nand_burn_table.xml 是什么
+
+`nand_burn_table.xml` 是给 PC 烧写工具用的**整片烧写表**，不止是分区引导，它包含两部分：
+
+1. 全部 9 个 NAND 分区的布局与各自镜像文件（otfl、uflag、uboot、bl31、kernel、rootfs、upgrade、userfs、data）；
+2. `<Env>` 段里的 u-boot 环境变量（bootargs、bootcmd 等，含 `misc_check → nand_ota_upgrade` 的 OTA 引导逻辑）。
+
+按烧写表整片烧写 = 9 个分区全部擦除重写，**userfs 和 data 里的所有数据会被清空**；而 img OTA 升级只覆盖上面 4 个分区，**/opt 和 /data 的内容保留**——你说的这个理解是对的。
+
+#### img 升级的正确流程（不是“拷进去重启”就完事）
+
+OTA 需要把升级包写进 UBI 的 upgrade 卷并置升级标志，重启后 u-boot 才会烧写。标准三步：
+
+```sh
+# 1. 主机把 img 拷到板端（13.6MB）
+sshpass -p 123456 scp main/pub/lq560plusv100_image_glibc/upgrade_0x01000300.img \
+  root@192.168.1.101:/tmp/upgrade.img
+
+# 2. 板端执行升级准备（校验 CRC/版本/签名，写入 upgrade 卷，置 PENDING）
+sshpass -p 123456 ssh root@192.168.1.101 "/usr/bin/ota_prepare /tmp/upgrade.img"
+
+# 3. 重启；u-boot 的 misc_check 检测到 PENDING 后自动 nand_ota_upgrade 烧写并进入新系统
+sshpass -p 123456 ssh root@192.168.1.101 "reboot"
+```
+
+板端 rootfs 里还有一个 `upgrade_triggerd` 守护进程（`/etc/upgrade_triggerd`），可能监控 `/data/upgrade` 自动触发 `ota_prepare`；但它依赖具体版本行为，**不要只靠“scp + 重启”**，升级时显式跑一次 `ota_prepare` 最稳。升级后 `/opt`、`/data` 保持原样，app、模型、SSH 配置都还在。
+
+#### img 能改什么、不能改什么
+
+- **能改**：uboot、bl31（可信固件）、kernel、rootfs——即启动链和整个 Linux 系统。硬件相关的驱动改动只要在 kernel/rootfs 里，就可以用 img 下发。
+- **不能改（该 img 不包含）**：otfl（安全区/一次性配置区）、uflag、userfs、data；芯片级 OTP 熔丝、产线烧录的 secure boot 密钥等真正“一次性硬件配置”无法用 img 更新，只能专用烧录工具/产线流程处理。
+
+#### 在新的一模一样相机上重新运行本 app
+
+新相机需要走一遍「基础固件 → 通用 app 资产 → 设备绑定资产 → 标定 → 验证」：
+
+1. **基础固件（一次性）**：新板按产线流程用 PC 烧写工具 + `nand_burn_table.xml` 整片烧写（会清空数据，适合新板出厂）；若新板已带系统，先用 `uname -a` 确认内核编译时间与 `upgrade_0x01000300.img`（2026-08-15 构建）一致，不一致再按上面三步 OTA 升级。
+2. **网络**：新板默认可能是 UVC 模式，按 `board-network-setup` skill 部署 RNDIS+SSH（`user_init.sh`、`usb-ether.sh`、`/data/openssh`）。
+3. **通用资产（直接拷贝，不绑定设备）**：
+   ```sh
+   sshpass -p 123456 scp main/src/component/media/sample/stereo_app_bk/stereo_app \
+     root@<新板IP>:/opt/stereo/stereo_app
+   sshpass -p 123456 scp ~/npu_toolchain/common/samples/tiny-yolov3_yuv420sp/tiny-yolov3_yuv420sp_b.ortm \
+     root@<新板IP>:/opt/model/tiny-yolov3_yuv420sp_b.ortm
+   # scene 参数目录也整体拷贝
+   ```
+4. **设备绑定资产（每台设备必须重做，不能复用旧板文件）**：stereo 模型是按 UID 加密 + license 校验的。新板先跑 `/tmp/auth_gen` 拿到新 UID，主机用新 UID 重新 `encrypt_model` 生成 `/data/model/stereo_match.ortm.enc`，并生成新板自己的 `/opt/stereo/license.bin`（见项目 skill「模块8」完整流程）。
+5. **标定与 LUT（每台相机不同）**：`stereo_calib.json`、`lut_left.bin`、`lut_right.bin` 是这台相机的双目标定结果；直接复用旧机文件会导致极线矫正和距离不准，需要对**新相机重新标定**再部署。
+6. **验证**：重启板端 → `cd /opt/stereo && ./stereo_app` → 主机 `stereo_receiver.py` 看左图检测框/距离、右图和视差是否正常。
