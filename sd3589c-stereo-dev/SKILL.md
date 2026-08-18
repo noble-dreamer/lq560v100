@@ -187,6 +187,7 @@ out->disp_bytes = up_w * up_h * sizeof(ot_u16);  // 614400 bytes
 | license文件 | `/opt/stereo/license.bin`（64B，设备绑定授权） |
 | auth_gen | `/tmp/auth_gen`（临时部署，运行后可删除） |
 | scene参数 | `/opt/stereo/param/sc132gs/` |
+| yolo模型 | `/opt/model/tiny-yolov3_yuv420sp_b.ortm`（9MB，`/data` 放不下，放 `/opt`） |
 | 源码 | `main/src/component/media/sample/stereo_app_bk/`（当前仓库布局，SDK 根=仓库根） |
 | 模型源文件 | 仓库根 `stereo_s_ori_h448_w640_128_sub_v1.7_e300_sim.ortm`（明文，加密后部署） |
 | 交叉工具链 | `/opt/linux/x86-arm/aarch64-otv02-linux-gnu-gcc/bin`（备选 `/home/lzx/gcc-aarch64-otv02-linux-gnu/aarch64-otv02-linux-gnu-gcc/bin`） |
@@ -213,6 +214,8 @@ sshpass -p "123456" scp main/src/component/media/sample/stereo_app_bk/scripts/st
 sshpass -p "123456" scp main/src/component/media/sample/stereo_app_bk/scripts/lut_left.bin root@192.168.1.101:/opt/stereo/lut_left.bin
 sshpass -p "123456" scp main/src/component/media/sample/stereo_app_bk/scripts/lut_right.bin root@192.168.1.101:/opt/stereo/lut_right.bin
 # 模型必须按“模块8”用板端 UID 加密，再部署为 /data/model/stereo_match.ortm.enc
+# yolo 模型（非设备绑定，直接拷贝）：
+sshpass -p "123456" scp ~/npu_toolchain/common/samples/tiny-yolov3_yuv420sp/tiny-yolov3_yuv420sp_b.ortm root@192.168.1.101:/opt/model/
 
 # 运行完整链路
 sshpass -p "123456" ssh root@192.168.1.101 "cd /opt/stereo && ./stereo_app"
@@ -222,6 +225,14 @@ sshpass -p "123456" ssh root@192.168.1.101 "cd /opt/stereo && ./stereo_app --raw
 ```
 
 **板端存储**: 加密模型约 27.5MB，`/data` 是 UBIFS 且总容量只有约 35MB。空间不足时删除 `/data/npu_demo` 下旧的 abab demo 模型（mobilenetv2/tiny-yolov3）、bin 与 lib 中的构建产物（均可从 SDK 重编），用 `df -k /data` 确认余量后再上传模型。
+
+**Makefile 无头文件依赖**: stereo_app 的 Makefile 没有 `-MMD` 依赖，只改 `.h` 不会重编对应 `.o`（例如只改 `stereo_yolo.h` 里的模型路径，二进制不会更新）。改头文件后必须 `touch` 对应 `.c` 或走完整 clean 流程，部署后可用 `strings stereo_app | grep 路径` 复核。
+
+**停止进程的正确姿势**: busybox 的 `pgrep -x`/`pkill -x` 不匹配 comm，`pkill -f stereo_app` 还会误杀远程 SSH 的包装 shell。用 `/proc` comm 扫描按名找 PID 再 `kill -INT`（勿 kill -9）：
+
+```sh
+ssh root@192.168.1.101 'kill -INT $(for p in /proc/[0-9]*; do c=$(cat $p/comm 2>/dev/null); [ "$c" = "stereo_app" ] && echo ${p#/proc/}; done)'
+```
 
 **坑**: 完整链路每次测试前建议 `reboot` 板子。若 VENC 通道残留（kill -9 后未正常 deinit），`ot_eis_venc_chn_create()` 会返回 `0x80080052`（VENC_EXIST）。当前代码已增加自动恢复机制：检测到 chn0 创建失败时，自动执行 `ot_eis_venc_exit()` + `ot_eis_venc_init()` + 重试创建。raw-only 不启动 VENC，可用于绕开 VENC 资源冲突并快速验证 VI/ISP/raw capture。
 
@@ -749,7 +760,7 @@ lib.LZ4_decompress_safe.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_i
 ```
 
 ### 视差图显示策略
-当前视差以板端上采样后的 640×448 分辨率显示（1:1 映射，无额外上采样），直接在 1280 宽底面板中居中放置。测距使用 640×448 原始数据。
+当前布局（2026-08-18 改版）：**左视图（目标检测图）放大到 960×672**，右视图保持 640×448（顶部对齐），**视差图缩小到 427×299（约 2/3）并居中**，合成窗口 1920×1027 + 右侧 320 宽信息面板。测距仍使用 640×448 原始数据，面板偏移/鼠标映射常量 `DISP_PANEL_OFFSET_X/Y`、`DISPARITY_DISP_W/H` 已同步更新，改布局时这些必须一起改。窗口放不下加 `--scale 0.8`。
 
 **伪彩色渲染**：使用 JET colormap + min/max 归一化，视差值归一化到 [0, max_disp] 后映射到 0-255 色域，无效视差（<0.1）显示为黑色。优化后通过预计算 LUT 实现：
 ```python
@@ -771,6 +782,8 @@ disp_color = self._disp_lut[disparity]  # O(1) per pixel
 python3 stereo_receiver.py --host 192.168.1.101 --scale 0.5  # 半分辨率显示
 ```
 注意：`--scale` 对帧率无显著提升，因 `cv2.imshow` 的 Qt/X11 后端有固定渲染开销，与图像尺寸无关。
+
+**conda cv2 5.x 无字体警告**：`npu` 环境的 cv2 用 Qt 后端，启动会打 `Qt no longer ships fonts / Cannot find font directory .../cv2/qt/fonts`，导致 cv2 自己画的文字（信息面板/FPS/测距文字）可能不渲染；**左图里的检测框标签/距离是板端画进 JPEG 的，不受影响**。修复：把 DejaVu 字体目录放到 `.../site-packages/cv2/qt/fonts/`。
 
 ---
 
@@ -821,7 +834,7 @@ static const unsigned char STEREO_SEC_MASTER_KEY[32] = { ... };  // 共享密钥
 
 ### 板端集成点
 1. **stereo_media.c** — NPU init 前调用 `stereo_sec_check_device()` 验证设备授权
-2. **stereo_npu.c** — 用 `stereo_sec_load_decrypt_model()` + `ot_avp_npu_load_model_from_mem()` 替代 `ot_avp_npu_load_model()`（从文件加载）
+2. **stereo_npu.c** — 用 `stereo_sec_decrypt_model_to_file("/tmp/stereo_plain.ortm")` 解密成临时明文文件，再 `ot_avp_npu_load_model()` 从文件加载、load 后立即 unlink。**不能用 `ot_avp_npu_load_model_from_mem()`：从内存加载的模型走异步 trigger/wait 会永久卡在 wait**（详见模块9）。
 
 ### 编译
 ```bash
@@ -908,21 +921,61 @@ cd /opt/stereo && ./run.sh &
 - **`ot_avp_npu_load_model_from_mem` 的模型走异步 trigger/wait 会永久卡在 wait**（同步 execute 正常）。必须解密成 `/tmp/stereo_plain.ortm` 文件、`ot_avp_npu_load_model` 加载，load 后立即 unlink。yolo 明文模型在 `/opt/model/tiny-yolov3_yuv420sp_b.ortm`（`/data` 放不下）。
 - NPU 输出禁整块拷贝、禁逐元素读 `ot_avp_npu_malloc` 内存：F32 视差 286KB 标量扫描 ~18ms/帧；保留 SMR cached 输出 + `ot_smr_flush_cache` 为 ~1.3ms。yolo 输出走 stride 对齐的就地懒读（先读 objectness，过阈才读 85 值组）。
 - VPROC chn 级 crop 在 **chn 缩放之后**生效：全幅 1080×1280 先缩到竖版 352×416，再 chn crop (20,0,312,416) 等效源空间 960×1280@x=60；把 crop 写成源空间坐标会得到 416×252 错误输出。
-- 检测通道 attr 竖版 312×416（270° 交换宽高、height 16 对齐）、`compress_mode=NONE`、FRC src=30 dst=10。本 app 名义 20fps 但实测传感器出帧 ~30fps，src=20 会得到 15fps。
-- 检测线程单槽最新帧 + 互斥锁/条件变量，**拷贝即消费**；npu 线程非阻塞取槽（有则 yolo，无则跳过），19fps stereo 主循环不会被 10fps 检测率拖慢。
+- 检测通道 attr 竖版 312×416（270° 交换宽高、height 16 对齐）、`compress_mode=NONE`、FRC src=30 dst=10。本 app 名义 20fps 但实测传感器出帧 ~30fps（scene_auto 的 `ot_scene_set_static_ae` 按 `config_product_scene_1p5m30_built_in.ini` 的 `frame_rate=3000` 把 AE 帧率覆盖成 30），src=20 会得到 15fps。
+- 检测线程单槽最新帧 + 互斥锁/条件变量，**拷贝即消费**；npu 线程**阻塞**等新检测帧（1s 超时兜底），整条流水线定拍在 10fps。**不要改回非阻塞取槽**：19fps JPEG 与 10fps yolo 错拍会让「有框/无框」两帧交替，框严重频闪；定拍后每帧都带新画的框，实测 10.02fps 稳定。
 - 左帧是 YVU420SP（fmt 221），UV 行 stride=1280 字节，chroma 偏移 = `phys_addr[1]-phys_addr[0]`。USER 帧画框用 `ot_smr_mmap` + 写回 `ot_smr_flush_cache`，否则 VENC DMA 读不到。画框顺序必须在 npu_proc 推入 venc 队列之前。
 - 框坐标映射：`x_l=x*1280/416`、`y_l=60+(y-52)*960/312`，越界截断；框色按 class_id 用黄金角色相生成不同饱和色（RGB→BT.601 YUV），框内原图不动（勿把框内 UV 填 128，否则亮场景下框内会发灰白）。
 - 框中心距离：取框左右边缘中点在视差图（640×448，左图 x/2、y=(y-92)/2 映射）上采两个端点 Q5，线性拟合中点 → `Z_mm=fx_disp·baseline_mm/(q5/32)`，画「X.XXm」于框中央；q5<16（<0.5px，过远）或端点越界不显示。fx_disp=P1.fx/2、baseline 从 `/opt/stereo/stereo_calib.json` 读，与 receiver 同一套换算保证一致。
+- 文字渲染：内置 5×7 位图字体放大 **3×**（15×21px），标签类别色底 + 按底色亮度自适应黑/白字，距离为深色底白字居中。字体表只有 A-Z/0-9/./空格/小写 m——**要显示别的单位/字符得先补 glyph，否则未知字符静默变成空格**（曾出现距离丢了 `m` 单位）。
 
 ### 实测基线（2026-08-18）
 
-- stereo 19.2fps / NPU 48ms / SubPixel 1.3ms；yolo 接入后 18.3fps（单 NPU 串行，yolo ~14ms 且仅在有检测新帧时触发），yolo 10.0fps。
+- 输出帧率固定 10.02fps（stereo 48ms + yolo ~14ms 在单 NPU 上串行，10fps 周期内有余量）；纯 stereo 基线 19.2fps / SubPixel 1.3ms。
 - 5 分钟连续运行（155 采样/310s）：RSS 稳定 12.0MB（末 60s 持平），MemAvailable 9.4~25MB，CPU ~43% 单核。
 - M2 探针实测：stereo 模型 = 2 输入 + **1 输出 F32 [224,320]**（半分辨率视差，非早期文档的 cost+disp 双输出）；合成对视差输出空间均值 12.06 = 输入空间 24px。
+- 框中心距离与 receiver 同帧同坐标交叉验证一致（端点 4090/4094 → 中点 4092 → 0.14m）。
+
+### 运维坑（3.6 期间实测）
+
+- **同一时间只允许一个媒体实例**：完整链路运行时再开 `./stereo_app --raw-only`（或第二个实例）会 `ot_vrb_config failed` / `media deinit fail 0xa0028022`，并把正在跑的进程媒体栈卸掉，日志刷 `vproc_get_chn_frame return 0x80010007`（VPROC NO_START）后帧流停摆。回归 raw-only 必须在主进程停掉之后做。
+- kill -9 / 异常退出会留下脏媒体状态，下次启动直接 `ot_vrb_config failed`；`reboot` 最干净（`load_lq560v100 -a` 有过把 RNDIS 也带断的记录，谨慎用）。
+- 5 分钟资源监控：用 `/proc/[0-9]*/comm` 扫描拿 PID，采样 `VmRSS/MemFree/MemAvailable/utime+stime`；勿在监控期间跑任何第二个媒体命令，否则数据被污染。
 
 ### 构建/部署/运行
 
 与「构建与部署」一致，只多一步 yolo 模型部署（见 dual_model_abab README「十」的完整命令）。
+
+---
+
+## 模块10: 固件升级与整机部署
+
+### 升级包 vs 烧录表（先分清这两件事）
+
+- `main/pub/lq560plusv100_image_glibc/upgrade_0x01000300.img`（内部 `fw_version=0x01000300`）是 **OTA 升级包**，实测只含 4 个组件：uboot、bl31、kernel、rootfs。升级只重写这四块启动/系统分区，**userfs(/opt) 和 data(/data) 不动，数据保留**。
+- `main/pub/lq560plusv100_image_glibc/nand_burn_table.xml` 是 PC 烧写工具的**整片烧写表**：9 个分区布局 + 各分区镜像 + `<Env>` 段的 u-boot 环境变量（bootargs/bootcmd 含 `misc_check→nand_ota_upgrade` 的 OTA 逻辑）。用它整片烧写会清空所有分区数据，适合新板出厂。
+
+### OTA 升级正确姿势（不是 scp+重启就完事）
+
+升级包必须写进 UBI `upgrade` 卷并置 PENDING 标志，重启后 u-boot 才会烧写：
+
+```sh
+scp upgrade_0x01000300.img root@192.168.1.101:/tmp/upgrade.img
+ssh root@192.168.1.101 "/usr/bin/ota_prepare /tmp/upgrade.img"   # 校验+写卷+置标志
+ssh root@192.168.1.101 "reboot"                                  # u-boot 自动 nand_ota_upgrade
+```
+
+板端 rootfs 有 `upgrade_triggerd` 守护（`/etc/upgrade_triggerd`）可能自动监控 `/data/upgrade`，但不要只靠它，显式跑 `ota_prepare` 最稳。img 能改的是启动链+Linux 系统（含 kernel/rootfs 里的硬件驱动）；改不了 otfl/uflag/userfs/data 和芯片级 OTP 熔丝等一次性配置。
+
+### 新的一模一样相机重新跑本 app（顺序不能少）
+
+1. 基础固件：新板用烧写工具 + `nand_burn_table.xml` 整片烧写（或已带系统时按上面对照内核编译时间确认版本）；不一致再 OTA。
+2. 网络：按 `board-network-setup` skill 部署 RNDIS+SSH（新板可能默认 UVC 模式）。
+3. 通用资产直接拷贝：`stereo_app`、`/opt/model/tiny-yolov3_yuv420sp_b.ortm`、`/opt/stereo/param/sc132gs/`。
+4. **设备绑定重做（旧板文件不可复用）**：新板 `/tmp/auth_gen` 取新 UID → 主机 `encrypt_model` 重新加密 → 生成新板自己的 `/opt/stereo/license.bin` 与 `/data/model/stereo_match.ortm.enc`。
+5. **新相机重新标定**：`stereo_calib.json`、`lut_left.bin`、`lut_right.bin` 每台不同，复用旧标定会导致矫正与距离不准。
+6. 重启验证：`cd /opt/stereo && ./stereo_app`，主机 `stereo_receiver.py` 检查左图框/距离、右图、视差。
+
+完整命令清单在 dual_model_abab README「十一」。
 
 ---
 
@@ -936,6 +989,8 @@ cd /opt/stereo && ./run.sh &
 | 0xa0088008 | VENC资源未释放 | 先reboot板子再运行 |
 | 0x80010003 | VPROC NOT_SUPPORT | 3DNR等不支持的功能调用，可按具体模块判断是否非致命；当前矫正链路仅使用 XY-LUT |
 | 0x80000005 | VI NO_ACCESS | scene_auto初始化时可能出现的警告；若 raw-only 已继续启动 raw_capture，可先按非致命处理 |
+| 0x80010007 | VPROC NO_START | 正在跑时被另一媒体实例/raw-only 把媒体栈卸了；停掉多余实例，必要时 reboot |
+| 0xa0028022 / ot_vrb_config failed | 媒体/VRB 脏状态或资源被占用 | kill -9 后常见；reboot 清状态再启动 |
 | VPROC输出全黑 | XY-LUT坐标格式错误 | LUT数据区坐标必须为像素坐标×16(Q28.4)，不要用×65536(Q16.16) |
 | raw header closed | 9001连接后无header | 查看板端 `/tmp/stereo_app.log`，重点查 VI dump、mmap、send_all 日志 |
 | raw data size mismatch | RAW0 meta解析长度不一致 | Python端必须使用 `RAW_META_FMT = '>4sHHHHBBHII'` 24字节格式 |
