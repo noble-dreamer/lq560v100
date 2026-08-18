@@ -7,6 +7,7 @@
 BOARD_IP=${BOARD_IP:-192.168.1.101}
 BOARD_USER=${BOARD_USER:-root}
 REPEAT=${REPEAT:-30}
+CAMERA_FPS=${CAMERA_FPS:-10}
 OUTDIR=./camera_stream_out
 HOSTDIR=./camera_stream_logs
 
@@ -18,9 +19,10 @@ mkdir -p "$OUTDIR" "$HOSTDIR"
 
 # 板端跑相机模式 stream=1：stdout 只有协议帧，普通日志走 ssh 的 stderr
 START=$(date +%s)
+echo "config: repeat=$REPEAT camera_fps=$CAMERA_FPS"
 ssh -T "$BOARD_USER@$BOARD_IP" "cd /data/npu_demo \
   && ./bin/sample_dual_model_abab \
-       $MODEL_A $INPUT_A $MODEL_B camera $REPEAT none 1" \
+       $MODEL_A $INPUT_A $MODEL_B camera $REPEAT none 1 $CAMERA_FPS" \
   2>"$HOSTDIR/board_stderr.log" \
   | python3 host/npu_stream_receiver.py -q -o "$OUTDIR" 2>"$HOSTDIR/receiver_stderr.log"
 END=$(date +%s)

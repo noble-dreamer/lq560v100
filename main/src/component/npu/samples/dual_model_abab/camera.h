@@ -24,6 +24,10 @@ extern "C" {
 #define CAMERA_SRC_W      640
 #define CAMERA_SRC_H      480
 
+/* 检测通道帧率：传感器 30fps 源，FRC 目标帧率（1..30，默认 10） */
+#define CAMERA_FPS_DEFAULT 10
+#define CAMERA_FPS_MAX     30
+
 typedef struct {
     uint32_t det_frames;   /* 检测通道累计帧数 */
     uint32_t lr_pairs;     /* 左右 PTS 配对帧数 */
@@ -37,7 +41,7 @@ int32_t camera_init(void);
 void camera_deinit(void);
 
 /* 启动 / 停止 sc132gs 管线（含 scene_auto 与采集线程） */
-int32_t camera_start(void);
+int32_t camera_start(uint32_t camera_fps);
 void camera_stop(void);
 
 /* 把最新检测帧按 416x312 内容 + 上下灰边拷入 416x416 YUV420SP 输入缓冲 */

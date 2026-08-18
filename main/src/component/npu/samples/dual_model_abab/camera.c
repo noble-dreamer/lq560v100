@@ -272,7 +272,7 @@ static ot_s32 camera_user_pool_create(ot_eis_img_attr *img_attr, ot_eis_handle *
     return OT_SUCCESS;
 }
 
-int32_t camera_start(void)
+int32_t camera_start(uint32_t camera_fps)
 {
     ot_s32 ret = OT_SUCCESS;
     ot_s32 i = 0;
@@ -286,9 +286,16 @@ int32_t camera_start(void)
     ot_bool chnl_sw_r[OT_EIS_VPROC_GRP_CHN_MAX_NUM] = {OT_TRUE, OT_FALSE, OT_FALSE, OT_FALSE};
     ot_eis_handle vi_pipe_hdl[OT_EIS_VI_MAX_PIPE_NUM] = {0};
     ot_eis_handle vp_grp_hdl[OT_EIS_VI_MAX_PIPE_NUM] = {0};
+    uint32_t fps = camera_fps;
 
     if (gs_sys_init != OT_TRUE || gs_ctx.started == OT_TRUE) {
         return OT_FAILURE;
+    }
+    if (fps == 0) {
+        fps = CAMERA_FPS_DEFAULT;
+    }
+    if (fps > CAMERA_FPS_MAX) {
+        fps = CAMERA_FPS_MAX;
     }
 
     for (i = 0; i < 2; i++) {
@@ -322,7 +329,7 @@ int32_t camera_start(void)
     gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].image_attr.height = CAMERA_DET_OUT_W;
     gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].image_attr.compress_mode = OT_EIS_IMAGE_COMPRESS_MODE_NONE;
     gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].frc.src_frame_rate = 30;
-    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].frc.dst_frame_rate = 10;
+    gs_ctx.vp_cfg[0].chn_attr[CAMERA_DET_CHN].frc.dst_frame_rate = (ot_s32)fps;
 
     for (i = 0; i < 2; i++) {
         ot_eis_handle pool_hdl = OT_NULL;
@@ -403,8 +410,8 @@ int32_t camera_start(void)
         goto bind_fail;
     }
     gs_ctx.started = OT_TRUE;
-    printf("[camera] pipeline up: chn0=960x1280 YVU420SP, chn2=%dx%d YUV420SP frc=30->10\n",
-           CAMERA_DET_OUT_W, CAMERA_DET_OUT_H);
+    printf("[camera] pipeline up: chn0=960x1280 YVU420SP, chn2=%dx%d YUV420SP frc=30->%u\n",
+           CAMERA_DET_OUT_W, CAMERA_DET_OUT_H, fps);
     return OT_SUCCESS;
 
 bind_fail:

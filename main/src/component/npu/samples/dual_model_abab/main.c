@@ -67,8 +67,9 @@ typedef struct {
 
 static void usage(const char *prog)
 {
-    printf("Usage: %s [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir] [stream]\n", prog);
+    printf("Usage: %s [modelA] [inputA] [modelB] [inputB] [repeat] [output_dir] [stream] [camera_fps]\n", prog);
     printf("inputB may be \"camera\" to feed model B from the sc132gs detection channel.\n");
+    printf("camera_fps is the detection channel FRC target (1..30, default 10).\n");
     printf("--dump-frame writes one camera frame to /tmp/camera_frame.yuv420sp (debug).\n");
     printf("output_dir is optional; omit it to run in perf mode without saving results.\n");
     printf("stream: 0=off, 1=send results over SSH stdout, 2=also send output tensors.\n");
@@ -949,6 +950,7 @@ int main(int argc, char **argv)
     ot_u32 repeat = (argc > 5) ? (ot_u32)atoi(argv[5]) : 1;
     const char *output_dir = (argc > 6) ? argv[6] : NULL;
     ot_u32 stream_level = (argc > 7) ? (ot_u32)atoi(argv[7]) : 0;
+    ot_u32 camera_fps = (argc > 8) ? (ot_u32)atoi(argv[8]) : CAMERA_FPS_DEFAULT;
     bool stream_mode = (stream_level > 0);
     bool stream_tensors = (stream_level >= 2);
     bool save_output = (output_dir != NULL) && !stream_mode;
@@ -1028,7 +1030,7 @@ int main(int argc, char **argv)
             printf("[B] camera input requires a tiny-yolov3 detection model\n");
             goto cleanup_models;
         }
-        ret = camera_start();
+        ret = camera_start(camera_fps);
         if (ret != 0) {
             printf("camera start fail\n");
             goto cleanup_models;
