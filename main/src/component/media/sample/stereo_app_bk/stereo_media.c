@@ -15,6 +15,7 @@
 #include "stereo_queue.h"
 #include "stereo_cve.h"
 #include "stereo_npu.h"
+#include "stereo_yolo.h"
 #include "stereo_sec.h"
 #include "stereo_subpixel.h"
 #include "stereo_venc.h"
@@ -86,6 +87,11 @@ static ot_bool                   g_raw_only_mode   = OT_FALSE;
 static volatile ot_bool          g_get_frm_run      = OT_FALSE;
 static volatile ot_bool          g_cve_run           = OT_FALSE;
 static volatile ot_bool          g_npu_run           = OT_FALSE;
+/* tiny-yolov3 state: enabled when the model loads; the detection-channel
+   producer (M4) sets g_det_frame_valid when a fresh frame is available. */
+static volatile ot_bool          g_yolo_enabled      = OT_FALSE;
+static volatile ot_bool          g_det_frame_valid   = OT_FALSE;
+static stereo_yolo_box_t         g_yolo_boxes[STEREO_YOLO_MAX_BOX];
 static volatile ot_bool          g_venc_run          = OT_FALSE;
 static volatile ot_bool          g_net_run           = OT_FALSE;
 
@@ -348,6 +354,15 @@ ot_s32 stereo_media_sys_init(void)
         goto npu_init_failed;
     }
 
+    /* Second model is optional: a missing yolo model degrades to stereo-only */
+    ret = stereo_yolo_init();
+    if (ret != OT_SUCCESS) {
+        STEREO_LOG("stereo_yolo_init failed (ret:0x%x), stereo-only mode\n", ret);
+        g_yolo_enabled = OT_FALSE;
+    } else {
+        g_yolo_enabled = OT_TRUE;
+    }
+
     /* CVE init */
     ret = stereo_cve_init();
     if (ret != OT_SUCCESS) {
@@ -406,6 +421,7 @@ void stereo_media_sys_deinit(void)
     stereo_network_disconnect();
     stereo_venc_deinit();
     stereo_cve_deinit();
+    stereo_yolo_deinit();
     stereo_npu_deinit();
     ot_buffer_pool_deinit();
     sample_comm_media_pipe_stop(g_media_pipe_hdl);
@@ -1057,9 +1073,16 @@ static void *stereo_npu_proc(void *p)
         ot_u32 disp_size = 0;
         ot_u32 buf_set_idx = 0;
 
-        /* Async two-phase: trigger, then wait (M3c adds the yolo trigger between). */
+        /* ABAB: trigger stereo, then yolo (only when a fresh detection frame
+           is available), then wait stereo and finish with yolo. */
+        ot_bool det_ready = OT_FALSE;
+
         PERF_START(npu);
         ot_s32 ret = stereo_npu_trigger(&npu_in->left_crop, &npu_in->right_crop);
+        if (ret == OT_SUCCESS && g_yolo_enabled == OT_TRUE &&
+            g_det_frame_valid == OT_TRUE) {
+            det_ready = (stereo_yolo_trigger() == OT_SUCCESS);
+        }
         if (ret == OT_SUCCESS) {
             ret = stereo_npu_wait(&cost_data, &cost_size,
                                   &disp_data, &disp_size,
@@ -1068,6 +1091,10 @@ static void *stereo_npu_proc(void *p)
         PERF_END(npu, npu_ms);
 
         if (ret != OT_SUCCESS || !disp_data) {
+            if (det_ready) {
+                stereo_yolo_wait();
+                g_det_frame_valid = OT_FALSE;
+            }
             STEREO_LOG("npu_infer failed, ret:0x%x, dropping frame\n", ret);
             ot_eis_vproc_chn_release_frame(npu_in->left_chn_hdl,  &npu_in->left_full);
             ot_eis_vproc_chn_release_frame(npu_in->right_chn_hdl, &npu_in->right_full);
@@ -1175,6 +1202,16 @@ static void *stereo_npu_proc(void *p)
                 out->disparity = upsampled;
                 out->disp_bytes = up_bytes;
             }
+        }
+
+        /* Finish the second model and decode boxes in 416x416 space; M5 maps
+           them to the 1280x1080 left frame and draws the rectangles. */
+        if (det_ready) {
+            ot_s32 yret = stereo_yolo_wait();
+            if (yret == OT_SUCCESS) {
+                (void)stereo_yolo_decode(g_yolo_boxes, STEREO_YOLO_MAX_BOX);
+            }
+            g_det_frame_valid = OT_FALSE;
         }
 
         /* Push to VENC queue — drop if full to avoid blocking NPU thread */
