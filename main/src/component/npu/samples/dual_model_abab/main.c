@@ -10,6 +10,7 @@
 #include "transfer.h"
 #include <float.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,8 @@
 #define STREAM_SYNC_SIZE     (48u)
 #define STREAM_RESULT_HEAD   (16u)  /* kind + pad + count u32 + duration_us u64 */
 #define STREAM_TENSOR_HEAD   (40u)
+#define STREAM_KIND_IMAGE_NV12 (1u)
+#define STREAM_IMAGE_HEAD    (12u)  /* kind + pad3 + width u32 + height u32 */
 
 #define DEFAULT_MODEL_A  "../data/model/classification/resnet50_binary_b.ortm"
 #define DEFAULT_INPUT_A  "../data/ImageNet/binary/ILSVRC2012_val_00024327.bin"
@@ -72,7 +75,7 @@ static void usage(const char *prog)
     printf("camera_fps is the detection channel FRC target (1..30, default 10).\n");
     printf("--dump-frame writes one camera frame to /tmp/camera_frame.yuv420sp (debug).\n");
     printf("output_dir is optional; omit it to run in perf mode without saving results.\n");
-    printf("stream: 0=off, 1=send results over SSH stdout, 2=also send output tensors.\n");
+    printf("stream: 0=off, 1=results, 2=results+tensors, 3=results+camera image.\n");
     printf("Defaults:\n  A: %s <- %s\n  B: %s <- %s\n",
            DEFAULT_MODEL_A, DEFAULT_INPUT_A, DEFAULT_MODEL_B, DEFAULT_INPUT_B);
 }
@@ -684,6 +687,33 @@ static ot_s32 stream_send_tensors(transfer_ctx *tx, const model_slot *slot, ot_u
     return 0;
 }
 
+/* IMAGE 帧（相机模式 stream>=3）：payload = kind(1=NV12) + pad3 + w u32 + h u32
+ * + w*h*3/2 紧凑 NV12。内容为模型 B 实际看到的 416x312 有效区，从 416x416
+ * letterbox 输入张量直接截取（Y 行 52..363、UV 行 26..181），零额外相机拷贝。
+ * 图像不做 zlib：板端压缩 ~194KB 需数十 ms，得不偿失。 */
+static ot_s32 stream_send_image(transfer_ctx *tx, const model_slot *slot, ot_u32 seq)
+{
+    static uint8_t payload[STREAM_IMAGE_HEAD + CAMERA_NPU_IN_LEN];
+    const uint8_t *src = (const uint8_t *)slot->inputs[0].virt_addr;
+    uint32_t top_pad = (CAMERA_NPU_IN_H - CAMERA_DET_OUT_H) / 2;
+    uint32_t y_size = (uint32_t)CAMERA_NPU_IN_W * CAMERA_NPU_IN_H;
+    uint32_t y_off = top_pad * CAMERA_NPU_IN_W;
+    uint32_t uv_off = y_size + (top_pad / 2) * CAMERA_NPU_IN_W;
+    uint32_t y_len = (uint32_t)CAMERA_DET_OUT_H * CAMERA_NPU_IN_W;
+    uint32_t uv_len = (uint32_t)(CAMERA_DET_OUT_H / 2) * CAMERA_NPU_IN_W;
+
+    if (slot->inputs[0].len < CAMERA_NPU_IN_LEN) {
+        return -1;
+    }
+    transfer_put_u8(payload, STREAM_KIND_IMAGE_NV12);
+    transfer_put_u32(payload + 4, CAMERA_DET_OUT_W);
+    transfer_put_u32(payload + 8, CAMERA_DET_OUT_H);
+    memcpy(payload + STREAM_IMAGE_HEAD, src + y_off, y_len);
+    memcpy(payload + STREAM_IMAGE_HEAD + y_len, src + uv_off, uv_len);
+    return transfer_send(tx, TRANSFER_TYPE_IMAGE, (uint8_t)slot->model_id, seq,
+                         payload, STREAM_IMAGE_HEAD + y_len + uv_len, false);
+}
+
 /* 非阻塞轮询 stdin：收到 STOP 控制帧时回 ACK 并返回 true。 */
 static bool stream_poll_stop(transfer_ctx *tx)
 {
@@ -952,7 +982,8 @@ int main(int argc, char **argv)
     ot_u32 stream_level = (argc > 7) ? (ot_u32)atoi(argv[7]) : 0;
     ot_u32 camera_fps = (argc > 8) ? (ot_u32)atoi(argv[8]) : CAMERA_FPS_DEFAULT;
     bool stream_mode = (stream_level > 0);
-    bool stream_tensors = (stream_level >= 2);
+    bool stream_tensors = (stream_level == 2);
+    bool stream_image = (stream_level >= 3);
     bool save_output = (output_dir != NULL) && !stream_mode;
     bool camera_mode = (strcmp(input_b, "camera") == 0);
     bool dump_frame = false;
@@ -962,6 +993,11 @@ int main(int argc, char **argv)
     int stream_fd = -1;
     ot_u32 frame;
     ot_s32 ret;
+
+    /* SSH 通道被主机关闭时写 stdout 会收到 EPIPE；忽略 SIGPIPE，让发送函数
+     * 返回错误走正常清理路径（camera_stop/model_destroy），避免进程被信号
+     * 杀掉后遗留失效媒体句柄，需要 load_lq560v100 -a 才能恢复。 */
+    signal(SIGPIPE, SIG_IGN);
 
     for (ot_s32 a = 1; a < argc; a++) {
         if (strcmp(argv[a], "--dump-frame") == 0) {
@@ -1065,6 +1101,9 @@ int main(int argc, char **argv)
             ret = camera_copy_latest_to_input(
                 (uint8_t *)models[1].inputs[0].virt_addr,
                 (uint32_t)models[1].inputs[0].len);
+            if (ret == 0 && stream_image) {
+                ret = stream_send_image(&tx, &models[1], frame);
+            }
             if (ret == 0 && dump_frame) {
                 FILE *fp = fopen("/tmp/camera_frame.yuv420sp", "wb");
 

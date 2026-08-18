@@ -37,6 +37,7 @@ typedef enum {
     TRANSFER_TYPE_ACK = 0x04,     /* acknowledgement */
     TRANSFER_TYPE_CONTROL = 0x05, /* host -> board control */
     TRANSFER_TYPE_ERROR = 0x06,
+    TRANSFER_TYPE_IMAGE = 0x07,   /* camera frame shown to the host GUI */
 } transfer_frame_type;
 
 typedef enum {
