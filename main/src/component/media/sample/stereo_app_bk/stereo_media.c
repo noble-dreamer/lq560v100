@@ -898,22 +898,32 @@ void stereo_media_shutdown(void)
 /* get_frame thread: acquire L+R VPROC ch0 frames                             */
 /* -------------------------------------------------------------------------- */
 
-/* Non-blocking: if a fresh detection frame is in the slot, letterbox it into
-   the yolo input and consume the slot. The producer refills at 10fps, so the
-   19fps stereo loop triggers yolo roughly every other iteration and is never
-   throttled by the detection rate. */
+/* Blocking: wait for a fresh detection frame, letterbox it into the yolo
+   input and consume the slot. This paces the whole NPU loop to the 10fps
+   detection rate, so every output frame carries freshly drawn boxes —
+   without it the 19fps JPEG stream alternates boxed/unboxed frames and the
+   boxes flicker badly. 1s timeout keeps the pipeline alive (stereo-only)
+   if the detection channel stalls. */
 static ot_s32 stereo_det_copy_latest(void)
 {
+    struct timespec ts;
     ot_s32 ret = OT_FAILURE;
 
     pthread_mutex_lock(&g_det_lock);
-    if (g_det_slot_valid == OT_TRUE) {
-        if (stereo_yolo_preprocess(&g_det_slot_frame) == OT_SUCCESS) {
-            ret = OT_SUCCESS;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += 1;
+    while (g_det_slot_valid != OT_TRUE) {
+        if (pthread_cond_timedwait(&g_det_cond, &g_det_lock, &ts) != 0) {
+            goto unlock_out;
         }
-        ot_eis_vproc_chn_release_frame(g_vproc_ctx.det_chn, &g_det_slot_frame);
-        g_det_slot_valid = OT_FALSE;
     }
+    if (stereo_yolo_preprocess(&g_det_slot_frame) == OT_SUCCESS) {
+        ret = OT_SUCCESS;
+    }
+    ot_eis_vproc_chn_release_frame(g_vproc_ctx.det_chn, &g_det_slot_frame);
+    g_det_slot_valid = OT_FALSE;
+
+unlock_out:
     pthread_mutex_unlock(&g_det_lock);
     return ret;
 }
