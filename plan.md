@@ -122,3 +122,39 @@
 - 板端 `repeat` 用大值（1000000）+ STOP 控制实现「长跑直到关闭」，不新增无限循环模式。
 - 本章按已落地的 416×312 实现（3.3 早期的 640×480 假设已按实际模型输入调整为 416×312+灰边）编写。
 - skill 的 `references/camera-npu-pipeline.md` 同步更新作为后续可选步骤。
+
+# 3.5 双目深度模型接入 dual_model_abab（文件输入先行）
+
+## 摘要
+
+用新到的双目深度模型 `stereo_s_ori_h448_w640_128_sub_v1.7_e300_sim.ortm` 替换 `dual_model_abab` 的模型 A（mobilenetv2 分类），B 保持 sc132gs 相机 + tiny-yolov3 检测不变。本阶段 A 先用**文件双目图片**喂入（左右两张 640×448 RGB888 planar），验证模型载入、推理与视差输出；相机双目数据（深度图 + 相机数据）在后续模型替换/管线合并时再接入。
+
+## 关键决策（已锁定）
+
+- 模型 I/O（依据 stereo_app 同系列模型与 .ortm 内 Preprocess 节点）：2 输入、2 输出；输入 0/1 均为 640×448 RGB888 planar UINT8（`[1,3,448,640]`，860160B/张），减 128 已固化在模型 DTC Preprocess 节点，软件不做色彩变换；输出按 size 区分：大者为 cost volume（128 层，`[128,224,320]` UINT8，约 9.2MB），小者为整数视差（`[224,320]` UINT8，0..128）。运行时一律查询 shape/dtype/size，不硬编码。
+- 模型文件 `_sim.ortm` 在本 SDK 可直接 `ot_avp_npu_load_model()` 明文加载（stereo_app 仅为防拷贝而加密，加密/设备绑定是后续可选步骤，不在本期）。
+- 输入文件：沿用 `get_input_file()` 多输入目录约定，目录内命名 `0`（左）、`1`（右）。
+- 板端存储：28MB 模型超出 `/data`（空闲 11.6MB）与 `/opt`（空闲 10.3MB），本阶段放 `/tmp`（50.7MB tmpfs，重启即失）做验证；正式持久化方案待定。
+- 合成验证对：左图为纹理+目标块，右图 = 左图内容左移 24px（`right[i,j]=left[i,j+24]`），预期视差≈24；用它验证「输入顺序、DTC 减 128、视差符号/值域」三点。
+- ABAB 调度不变：A(stereo) 与 B(detect) 均 MEDIUM 优先级，trigger A→B、wait A→B。
+
+## 实现改动（每步 ≤200 行、≤5 文件、验证后提交）
+
+1. 本计划写入 `plan.md`（本步）。
+2. 零代码基线：现有 `dual_model_abab` 二进制以 stereo 模型为 A、目录双目对为输入、tiny-yolov3 文件输入为 B，`repeat=1` 落盘模式跑通；核对 2in/2out、输出 size、合成视差≈24。
+3. 板端代码：`model_detect_kind` 增加 stereo 识别（2 输出且大者为 UINT8 3D、小者为 UINT8 disp），新增 `stereo_preprocess()`（逐行拷贝两路文件，无换算）与 `stereo_postprocess()`（v1：不整块拷贝输出，统计 disp 值域/均值，供校验与后续流式）。
+4. 流式传输：新增视差帧类型（先发整数 disp `[224,320]` 或 2× 上采样 uint16，方案按实测带宽定），主机接收器 + GUI 解析。
+5. 上位机 GUI：深度伪彩渲染与检测框叠加，STOP/断开生命周期沿用 3.4 已落地机制。
+6. A 接入相机双目数据：左右帧 PTS 配对喂入 stereo 模型（复用 camera.c 的左右原生帧取流），实现相机深度图 + 相机数据；此步在「换上新模型后」执行。
+
+## 测试计划
+
+- 合成对：disp 输出在有效区域内均值≈24±1，无效/边缘区域为 0 或模型定义的无效值；cost 大小 = 128×224×320。
+- 板端资源：模型放 `/tmp` 时监控 RSS/free，确认 101MB RAM 板可跑双模型；若 OOM，先降级为「仅 stereo 模型」的最小探针样例。
+- 回归：mobilenetv2 文件路径、相机检测 stream=1/2/3、GUI 在 stereo 接入前保持原样可跑。
+
+## 假设与默认
+
+- 新模型与 stereo_app 同系列（RGB planar 直传 + 模型内 DTC），输入约定沿用 stereo_types.h 的 640×448。
+- `_sim` 命名不代表仅模拟器可用：stereo_app 的板端模型即由 `*_sim.ortm` 加密而来。
+- 本期不做 subpixel/LZ4/VENC/加密，视差 v1 用模型原始整数输出。
