@@ -558,6 +558,22 @@ cd /opt/stereo && ./stereo_app --raw-only   # 仅 VI + 9001 raw capture（回归
 # 停止：kill -INT $(pgrep -f stereo_app)；异常残留时 /opt/ompmod/load_lq560v100 -a
 ```
 
+也可以不登录板子，直接在主机（WSL2）用 SSH 一条命令启动/停止：
+
+```sh
+# 前台远程启动：板端日志直接回显到主机终端，Ctrl+C 转发 SIGINT 干净退出
+sshpass -p 123456 ssh root@192.168.1.101 "cd /opt/stereo && ./stereo_app"
+
+# 后台远程启动：进程与日志留在板端（/tmp/stereo_run.log），SSH 立即返回
+sshpass -p 123456 ssh root@192.168.1.101 \
+  "cd /opt/stereo && nohup ./stereo_app > /tmp/stereo_run.log 2>&1 &"
+
+# 远程停止（SIGINT 走正常清理，勿 kill -9；异常残留再 /opt/ompmod/load_lq560v100 -a）
+sshpass -p 123456 ssh root@192.168.1.101 \
+  'kill -INT $(for p in /proc/[0-9]*; do c=$(cat $p/comm 2>/dev/null); \
+    [ "$c" = "stereo_app" ] && echo ${p#/proc/}; done)'
+```
+
 #### 显示（主机 WSL2 执行）
 
 ```sh
