@@ -117,7 +117,7 @@ B: ../data/model/classification/mobilenetv2_rgbplanar_b.ortm
 ### 通道与方向
 
 - 板端样例在 SSH 会话内运行：**stdout 只写协议帧**（板端→主机），**stdin 收主机控制帧**（主机→板端，支持 STOP）。SSH 本身提供传输、加密与认证。
-- 主机端用 `host/npu_stream_receiver.py`（Python3，只用标准库）解码流：magic 重同步、CRC 校验、zlib 解压、按 frame 序号查丢帧，并把结果/原始 tensor 落到主机目录。
+- 主机端用 `host/npu_stream_receiver.py`（Python3，只用标准库）解码流：magic 重同步、CRC 校验、zlib 解压、按 frame 序号查丢帧，并把结果/原始 tensor 落到主机目录；`--save-frames` 可把相机图像帧落盘为 `.yuv420sp` 供无 GUI 验证。
 
 ### 板端→主机结果流
 
@@ -130,7 +130,7 @@ ssh root@$BOARD_IP 'cd /data/npu_demo && ./bin/sample_dual_model_abab \
   1000 /tmp 1' | python3 host/npu_stream_receiver.py -o ./board_out
 ```
 
-`stream=1` 每帧发 2 条 RESULT 帧（A 的 top-5 / B 的 NMS 后检测框），`stream=2` 再追加 TENSOR 帧（按行紧凑、zlib 压缩后的原始输出）。主机端产物：
+`stream=1` 每帧发 2 条 RESULT 帧（A 的 top-5 / B 的 NMS 后检测框），`stream=2` 再追加 TENSOR 帧（按行紧凑、zlib 压缩后的原始输出），`stream=3`（仅相机模式）改为追加 IMAGE 帧（type=7：`kind=1(NV12)+pad+w+h` 加 416×312 紧凑 NV12，共 194,700B，不压缩、不落盘，取自模型 B 实际看到的 416×416 letterbox 输入的 416×312 有效区）。主机端产物：
 
 ```text
 board_out/stream.json     流元信息（协议版本、模型名/类型、总帧数）
@@ -459,16 +459,16 @@ cd /data/npu_demo
 
 位置参数依次为 `<modelA> <inputA> <modelB> <inputB> <repeat> <output_dir> <stream> <camera_fps>`，相机模式取值如下：
 
-| 位置 | 参数名 | 含义 | 示例值 | 说明 |
-| --- | --- | --- | --- | --- |
-| argv[1] | modelA | A 模型文件 | `mobilenetv2_rgbplanar_b.ortm` | 分类模型，继续走文件输入，不参与相机 |
-| argv[2] | inputA | A 模型输入文件 | `ILSVRC2012_val_00024327.rgb` | 同上，文件输入 |
-| argv[3] | modelB | B 模型文件 | `tiny-yolov3_yuv420sp_b.ortm` | 必须查询出 `detect-yolov3` 类型，否则报错退出 |
-| argv[4] | inputB | B 模型输入 | `camera` | 写 `camera` 才启用相机模式，其余值按文件路径处理 |
-| argv[5] | repeat | 推理帧数 | `3000` | 相机下每帧约 100ms，3000 帧约 5 分钟；`0` 视为 `1` |
-| argv[6] | output_dir | 落盘目录（可选） | `none` | 仅 `stream=0` 时生效；`stream>=1` 时被忽略，不写 `/data` |
-| argv[7] | stream | 流级别（可选） | `1` | `0`=不流式，`1`=只发结果，`2`=结果+压缩 tensor |
-| argv[8] | camera_fps | 检测通道帧率（可选） | `10` | FRC 目标帧率，范围 1..30，默认 10，超出按 30 封顶 |
+| 位置    | 参数名     | 含义                 | 示例值                           | 说明                                                          |
+| ------- | ---------- | -------------------- | -------------------------------- | ------------------------------------------------------------- |
+| argv[1] | modelA     | A 模型文件           | `mobilenetv2_rgbplanar_b.ortm` | 分类模型，继续走文件输入，不参与相机                          |
+| argv[2] | inputA     | A 模型输入文件       | `ILSVRC2012_val_00024327.rgb`  | 同上，文件输入                                                |
+| argv[3] | modelB     | B 模型文件           | `tiny-yolov3_yuv420sp_b.ortm`  | 必须查询出`detect-yolov3` 类型，否则报错退出                |
+| argv[4] | inputB     | B 模型输入           | `camera`                       | 写`camera` 才启用相机模式，其余值按文件路径处理             |
+| argv[5] | repeat     | 推理帧数             | `3000`                         | 相机下每帧约 100ms，3000 帧约 5 分钟；`0` 视为 `1`        |
+| argv[6] | output_dir | 落盘目录（可选）     | `none`                         | 仅`stream=0` 时生效；`stream>=1` 时被忽略，不写 `/data` |
+| argv[7] | stream     | 流级别（可选）       | `3`                            | `0`=不流式，`1`=只发结果，`2`=结果+压缩 tensor，`3`=结果+相机图像（仅相机模式） |
+| argv[8] | camera_fps | 检测通道帧率（可选） | `10`                           | FRC 目标帧率，范围 1..30，默认 10，超出按 30 封顶             |
 
 可选开关：`--dump-frame` 会把一帧 NPU 视角的 416x416 快照写到 `/tmp/camera_frame.yuv420sp`。它可放在任意位置，但建议放在所有位置参数之后；若恰好落在 argv[6] 位置会被同时当成 `output_dir`，触发落盘模式。
 
@@ -492,3 +492,27 @@ REPEAT=30 CAMERA_FPS=10 ./host/camera_stream.sh
 脚本内部 `ssh` 板端、以 `camera` + `stream=1` 启动样例，stdout 协议帧管道进 `host/npu_stream_receiver.py`，然后打印：A/B 结果条数与每帧时延、检测框总数与含框帧数、`src_w/src_h`、seq gap 与重同步/CRC 检查，并展示前 3 个有检测框的帧。输出落在 `camera_stream_out/results.jsonl` 与 `camera_stream_logs/`。认证方式与 `benchmark_stream.sh` 相同（主机能 `ssh root@192.168.1.101`，密码登录时终端会提示输入）。调帧率：`CAMERA_FPS=20`，调推理帧数：`REPEAT=600`。
 
 板端实测（相机模式，stream=1，3000 帧约 5 分钟）：每帧 `duration_us` 平均 99.9ms（冷启动首帧约 37ms，后续稳定约 100ms，无 >150ms 帧）；整机 CPU 平均 13.1%（峰值 53%）；进程 CPU 平均单核 15.2%；RSS 启动后稳定在约 11.8MB，最后 250s 无单调增长；主机端 6000/6000 条结果、0 次重同步/CRC 错误/丢帧；`/data` 与 `/tmp` 占用在运行前后不变。左右原生帧 ΔPTS 平均 0-1μs（硬件主从同步），远小于 16.6ms 容差。跑相机模式前若 `sample_comm_vi_start_vi` 报 `get dev_handle failed`，说明上一次异常退出残留了 VI 句柄，先执行 `/opt/ompmod/load_lq560v100 -a` 重置媒体栈再重跑。
+
+#### 上位机 GUI 实时显示（stream=3）
+
+样例目录下（WSL2 本机，tkinter/PIL/numpy/paramiko 已就绪）：
+
+```sh
+python3 host/npu_gui.py                      # 默认 192.168.1.101 / root / 123456 / 10fps
+python3 host/npu_gui.py --fps 20 --password <密码>
+python3 host/npu_gui.py --playback /tmp/stream.bin   # 离线回放录制的流，不连板子
+```
+
+CLI：`--host/--user/--password/--fps/--board-dir/--repeat`，模型与输入用 `--model-a/--input-a/--model-b` 覆盖（后续 A 换成立体匹配等模型时只改这几个参数，A 仍走文件输入，相机深度/相机数据留到新模型就绪后接入）。GUI 用 paramiko 开**无 PTY 的原始 SSH 通道**执行板端 `stream=3` 命令，读线程复用 `npu_stream_receiver.iter_frames/parse_result/parse_image`：NV12→RGB（BT.601 full-range）→PIL 缩放到 640×480 画布，按 seq 匹配同帧 detect 结果画绿框（框已是 640×480 源坐标，直接叠加），侧栏显示 seq、duration_ms、接收 fps、图像/重同步/CRC 计数、框数与 A 模型 top-5。渲染节奏跟随 `--fps`，缓存只保留最近 3 个 seq，积压旧帧丢弃防内存增长。
+
+关闭窗口或点 STOP：向通道 stdin 写 CONTROL STOP 帧，板端每 8 帧轮询一次（10fps 下最迟约 0.8s），回 ACK 后干净走 `camera_stop→model_destroy→npu_deinit` 退出；GUI 等 EOF 再断开，12s 未 EOF 报错。板端 `main()` 已 `signal(SIGPIPE, SIG_IGN)`：即使 GUI 在板端写流时被硬断开，写 stdout 也只是得到 EPIPE 返回错误、走同一清理路径，不会因 SIGPIPE 被杀掉而遗留失效媒体句柄；若仍见 `get dev_handle failed`，先跑 `/opt/ompmod/load_lq560v100 -a`（不用重启板子）。SSH 传输开 keepalive，异常断开弹窗退出。
+
+实测（stream=3，每档 300 帧：主机收全 300 图像 + 600 结果，0 次重同步/CRC/丢帧）：
+
+| camera_fps | 全程平均接收率 | 有效带宽 | 整机 CPU 均值/峰值 | 进程 CPU 均值/峰值 | RSS 均值/峰值 |
+| --- | --- | --- | --- | --- | --- |
+| 10 | 9.1 fps | 1.8 MB/s | 15.6% / 51% | 22.7% / 26% | 12.0 / 12.2 MB |
+| 20 | 16.6 fps | 3.2 MB/s | 24.8% / 54% | 30.3% / 33% | 11.6 / 12.1 MB |
+| 30 | 23.2 fps | 4.5 MB/s | 33.0% / 54% | 39.1% / 45% | 11.6 / 12.3 MB |
+
+与同 10fps 的 stream=1（进程 CPU 约 15.2%）相比，每帧 194KB 图像的 CRC+拷贝+SSH 写入约增加 7.5% 单核。30fps 时 RNDIS→Windows→WSL 链路先于板端成为瓶颈（板端 30fps 正常出帧，主机只收到约 23fps，链路实际吞吐约 4.5MB/s），推荐 10/20fps；30fps 仅作带宽上限参考。GUI 与 `camera_stream.sh`、stream=1/2、文件输入模式互不影响。
