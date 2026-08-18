@@ -31,6 +31,14 @@
 #include "ot_buffer_pool.h"
 #include "ot_smr.h"
 
+/* Detection channel (left VPROC group chn2): center 4:3 crop 960x1280@(60,0)
+   from the rectified full frame, 270deg rotation, scaled to 416x312 YUV420SP
+   at 10fps for tiny-yolov3. Geometry mirrors dual_model_abab/camera.c. */
+#define STEREO_DET_CHN         (2)
+#define STEREO_DET_OUT_W       (416)
+#define STEREO_DET_OUT_H       (312)
+#define STEREO_DET_FPS         (10)
+
 /* -------------------------------------------------------------------------- */
 /* Performance timing: stores NPU/SubPixel elapsed time to global variables     */
 /* for network transmission (no stdout output).                                */
@@ -70,6 +78,7 @@ typedef struct {
 typedef struct {
     ot_eis_handle chn_hdl[STEREO_SNS_NUM];    /* [0]=left ch0, [1]=right ch0 */
     ot_eis_handle grp_hdl[STEREO_SNS_NUM];
+    ot_eis_handle det_chn;                    /* left group chn2, 416x312 */
 } stereo_vproc_ctx_t;
 
 /* -------------------------------------------------------------------------- */
@@ -95,12 +104,21 @@ static stereo_yolo_box_t         g_yolo_boxes[STEREO_YOLO_MAX_BOX];
 static volatile ot_bool          g_venc_run          = OT_FALSE;
 static volatile ot_bool          g_net_run           = OT_FALSE;
 
+/* Detection-channel single-slot state (latest frame wins, copy consumes) */
+static volatile ot_bool          g_det_run           = OT_FALSE;
+static pthread_mutex_t           g_det_lock          = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t            g_det_cond          = PTHREAD_COND_INITIALIZER;
+static ot_bool                   g_det_slot_valid    = OT_FALSE;
+static ot_eis_img_frame          g_det_slot_frame;
+static ot_u32                    g_det_frames        = 0;
+
 /* Pipeline threads */
 static pthread_t                 g_get_frm_tid;
 static pthread_t                 g_cve_tid;
 static pthread_t                 g_npu_tid;
 static pthread_t                 g_venc_tid;
 static pthread_t                 g_net_tid;
+static pthread_t                 g_det_tid;
 
 /* Stage queues */
 static stereo_spsc_queue_t       g_q_vproc;     /* frame_pair_t -> cve */
@@ -134,6 +152,7 @@ void stereo_media_set_raw_only(ot_bool enable)
 /* -------------------------------------------------------------------------- */
 
 static void *stereo_get_frame_proc(void *p);
+static void *stereo_det_proc(void *p);
 static void *stereo_cve_proc(void *p);
 static void *stereo_npu_proc(void *p);
 static void *stereo_venc_proc(void *p);
@@ -563,6 +582,24 @@ ot_s32 stereo_media_startup(void)
         ctx->vp_cfg[i].chn_attr[0].image_attr.pixel_fmt = OT_EIS_IMAGE_FORMAT_YVU_420_SEMIPLANAR;
         ctx->vp_cfg[i].chn_attr[0].image_attr.width     = STEREO_SENSOR_HEIGHT;  /* 1080 */
         ctx->vp_cfg[i].chn_attr[0].image_attr.height    = STEREO_SENSOR_WIDTH;   /* 1280 */
+
+        if (i == 0) {
+            /* Detection channel: chn crop runs AFTER chn scale, so scale the
+               full 1080x1280 group frame to a portrait 352x416 canvas first,
+               then crop the center 4:3 region (312x416@x=20 == 960x1280@x=60
+               in source space) and rotate 270deg to the final 416x312. */
+            ctx->vp_cfg[i].chn_attr[STEREO_DET_CHN].mode = OT_EIS_VPROC_WORK_MODE_USER;
+            ctx->vp_cfg[i].chn_attr[STEREO_DET_CHN].frame_queue_depth = 2;
+            ctx->vp_cfg[i].chn_attr[STEREO_DET_CHN].image_attr.pixel_fmt =
+                OT_EIS_IMAGE_FORMAT_YUV_420_SEMIPLANAR;
+            ctx->vp_cfg[i].chn_attr[STEREO_DET_CHN].image_attr.width  = 352;
+            ctx->vp_cfg[i].chn_attr[STEREO_DET_CHN].image_attr.height = STEREO_DET_OUT_W;
+            ctx->vp_cfg[i].chn_attr[STEREO_DET_CHN].image_attr.compress_mode =
+                OT_EIS_IMAGE_COMPRESS_MODE_NONE;
+            /* The sensor delivers ~30fps in practice, like the abab sample */
+            ctx->vp_cfg[i].chn_attr[STEREO_DET_CHN].frc.src_frame_rate = 30;
+            ctx->vp_cfg[i].chn_attr[STEREO_DET_CHN].frc.dst_frame_rate = STEREO_DET_FPS;
+        }
     }
 
     /* -- Pre-load XY-LUT rectification (undistort + stereo rectify) -- */
@@ -607,13 +644,26 @@ ot_s32 stereo_media_startup(void)
         }
         ctx->vp_cfg[i].chn_attr[0].pool_handle = pool_hdl;
     }
+    {
+        ot_eis_handle pool_hdl = OT_NULL;
+        ret = stereo_user_buf_pool_create(
+            &ctx->vp_cfg[0].chn_attr[STEREO_DET_CHN].image_attr, &pool_hdl);
+        if (ret != OT_SUCCESS) {
+            STEREO_LOG("det user buffer pool create failed, ret:0x%x\n", ret);
+            goto create_pool_failed;
+        }
+        ctx->vp_cfg[0].chn_attr[STEREO_DET_CHN].pool_handle = pool_hdl;
+    }
 
     /* -- VPROC group start -- */
     {
         ot_bool pipe_sw[OT_EIS_VPROC_GRP_PIPE_MAX_NUM] = {OT_TRUE, OT_FALSE, OT_FALSE, OT_FALSE};
-        ot_bool chnl_sw[OT_EIS_VPROC_GRP_CHN_MAX_NUM]  = {OT_TRUE, OT_FALSE, OT_FALSE, OT_FALSE};
 
         for (i = 0; i < STEREO_SNS_NUM; i++) {
+            /* Left group also enables chn2 for detection; right stays chn0-only */
+            ot_bool chnl_sw[OT_EIS_VPROC_GRP_CHN_MAX_NUM] =
+                {OT_TRUE, OT_FALSE, (i == 0) ? OT_TRUE : OT_FALSE, OT_FALSE};
+
             ret = sample_comm_start_vproc(&ctx->vp_cfg[i], pipe_sw, chnl_sw);
             if (ret != OT_SUCCESS) {
                 STEREO_LOG("sample_comm_start_vproc[%d] failed, ret:0x%x\n", i, ret);
@@ -643,6 +693,31 @@ ot_s32 stereo_media_startup(void)
                 ro.enable = OT_TRUE;
                 ro.angle  = OT_EIS_RTT_270;
                 ot_eis_vproc_chn_set_rotation(ctx->vp_cfg[i].chn_hdl[0], &ro);
+            }
+
+            if (i == 0) {
+                /* chn2 takes its own 960x1280@(60,0) crop of the rectified
+                   full frame (group crop stays 1080x1280 for the stereo path),
+                   then the same 270deg rotation into 416x312. */
+                ot_eis_vproc_crop_param dcrop;
+                ot_eis_vproc_chn_rotation dro;
+
+                memset(&dcrop, 0, sizeof(dcrop));
+                dcrop.enable    = OT_TRUE;
+                dcrop.crop_type = OT_EIS_COORD_ABS;
+                dcrop.crop_rect.x      = 20;
+                dcrop.crop_rect.y      = 0;
+                dcrop.crop_rect.width  = STEREO_DET_OUT_H;   /* 312 */
+                dcrop.crop_rect.height = STEREO_DET_OUT_W;   /* 416 */
+                ot_eis_vproc_chn_set_crop(ctx->vp_cfg[i].chn_hdl[STEREO_DET_CHN],
+                                          &dcrop);
+
+                memset(&dro, 0, sizeof(dro));
+                dro.enable = OT_TRUE;
+                dro.angle  = OT_EIS_RTT_270;
+                ot_eis_vproc_chn_set_rotation(ctx->vp_cfg[i].chn_hdl[STEREO_DET_CHN],
+                                              &dro);
+                g_vproc_ctx.det_chn = ctx->vp_cfg[i].chn_hdl[STEREO_DET_CHN];
             }
 
             g_vproc_ctx.chn_hdl[i] = ctx->vp_cfg[i].chn_hdl[0];
@@ -703,10 +778,12 @@ ot_s32 stereo_media_startup(void)
     pthread_create(&g_npu_tid,     NULL, stereo_npu_proc,       NULL);
     pthread_create(&g_venc_tid,    NULL, stereo_venc_proc,      NULL);
     pthread_create(&g_net_tid,     NULL, stereo_net_proc,       NULL);
+    g_det_run = OT_TRUE;
+    pthread_create(&g_det_tid,     NULL, stereo_det_proc,       NULL);
 
     gettimeofday(&g_start_time, NULL);
     g_pipeline_started = OT_TRUE;
-    STEREO_LOG("pipeline started (5 threads, NPU+SubPixel serial)\n");
+    STEREO_LOG("pipeline started (6 threads, NPU+SubPixel serial)\n");
     return OT_SUCCESS;
 
 vi_bind_vp_failed:
@@ -777,6 +854,10 @@ void stereo_media_shutdown(void)
     g_net_run  = OT_FALSE;
     pthread_join(g_net_tid,  NULL);
 
+    /* Stop the detection producer before tearing down the VPROC channels */
+    g_det_run = OT_FALSE;
+    pthread_join(g_det_tid, NULL);
+
     /* Stop independent raw capture control before VI teardown */
     stereo_raw_capture_stop();
 
@@ -818,6 +899,50 @@ void stereo_media_shutdown(void)
 /* -------------------------------------------------------------------------- */
 /* get_frame thread: acquire L+R VPROC ch0 frames                             */
 /* -------------------------------------------------------------------------- */
+
+/* Detection thread: drain chn2 backlog, then keep ONLY the newest 416x312
+   frame in a single slot (mutex + condvar; the consumer copies and releases,
+   i.e. copying consumes the slot). Mirrors camera.c's get-frame discipline. */
+static void *stereo_det_proc(void *p)
+{
+    (void)p;
+    prctl(PR_SET_NAME, "st_det", 0, 0, 0);
+    ot_eis_handle chn_d = g_vproc_ctx.det_chn;
+    ot_eis_img_frame img = {0};
+
+    if (chn_d == OT_NULL) {
+        return OT_NULL;
+    }
+
+    while (ot_eis_vproc_chn_acquire_frame(chn_d, &img, 0) == OT_SUCCESS) {
+        ot_eis_vproc_chn_release_frame(chn_d, &img);
+    }
+
+    while (g_det_run == OT_TRUE) {
+        if (ot_eis_vproc_chn_acquire_frame(chn_d, &img, 500) != OT_SUCCESS) {
+            usleep(10 * 1000);
+            continue;
+        }
+
+        pthread_mutex_lock(&g_det_lock);
+        if (g_det_slot_valid == OT_TRUE) {
+            ot_eis_vproc_chn_release_frame(chn_d, &g_det_slot_frame);
+        }
+        g_det_slot_frame = img;
+        g_det_slot_valid = OT_TRUE;
+        g_det_frames++;
+        pthread_mutex_unlock(&g_det_lock);
+        pthread_cond_broadcast(&g_det_cond);
+    }
+
+    pthread_mutex_lock(&g_det_lock);
+    if (g_det_slot_valid == OT_TRUE) {
+        ot_eis_vproc_chn_release_frame(chn_d, &g_det_slot_frame);
+        g_det_slot_valid = OT_FALSE;
+    }
+    pthread_mutex_unlock(&g_det_lock);
+    return OT_NULL;
+}
 
 static void *stereo_get_frame_proc(void *p)
 {
