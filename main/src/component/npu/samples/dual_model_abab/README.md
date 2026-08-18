@@ -457,8 +457,35 @@ cd /data/npu_demo
   camera 3000 none 1
 ```
 
+位置参数依次为 `<modelA> <inputA> <modelB> <inputB> <repeat> <output_dir> <stream>`，相机模式取值如下：
+
+| 位置 | 参数名 | 含义 | 示例值 | 说明 |
+| --- | --- | --- | --- | --- |
+| argv[1] | modelA | A 模型文件 | `mobilenetv2_rgbplanar_b.ortm` | 分类模型，继续走文件输入，不参与相机 |
+| argv[2] | inputA | A 模型输入文件 | `ILSVRC2012_val_00024327.rgb` | 同上，文件输入 |
+| argv[3] | modelB | B 模型文件 | `tiny-yolov3_yuv420sp_b.ortm` | 必须查询出 `detect-yolov3` 类型，否则报错退出 |
+| argv[4] | inputB | B 模型输入 | `camera` | 写 `camera` 才启用相机模式，其余值按文件路径处理 |
+| argv[5] | repeat | 推理帧数 | `3000` | 相机下每帧约 100ms，3000 帧约 5 分钟；`0` 视为 `1` |
+| argv[6] | output_dir | 落盘目录（可选） | `none` | 仅 `stream=0` 时生效；`stream>=1` 时被忽略，不写 `/data` |
+| argv[7] | stream | 流级别（可选） | `1` | `0`=不流式，`1`=只发结果，`2`=结果+压缩 tensor |
+
+可选开关：`--dump-frame` 会把一帧 NPU 视角的 416x416 快照写到 `/tmp/camera_frame.yuv420sp`。它可放在任意位置，但建议放在所有位置参数之后；若恰好落在 argv[6] 位置会被同时当成 `output_dir`，触发落盘模式。
+
+缺省值（不传时）：modelA=`../data/model/classification/resnet50_binary_b.ortm`，inputA=`../data/ImageNet/binary/ILSVRC2012_val_00024327.bin`，modelB=`../data/model/classification/mobilenetv2_rgbplanar_b.ortm`，inputB=`../data/ImageNet/rgbplanar/ILSVRC2012_val_00024327.rgb`，repeat=`1`，stream=`0`。
+
 `camera.c` 启动与 `uvc_app` 相同的 sc132gs 管线（**不创建/绑定 UVC gadget**，USB 保持 RNDIS+ACM）：左/右 vproc 组输出原生 1280x960 帧，左组 chn2 检测通道做中心裁剪 960x1280@(60,0) + 270° 旋转 + 缩放，输出 416x312 YUV420SP、FRC 30→10。由于 omg 把 YUV420SP 原始输入尺寸钉死在 ONNX 头尺寸（416x416，无法直接转出 640x480 输入），416x312 内容按上下各 52 行灰边（Y=UV=128）补成模型要求的 416x416，检测框解码后再按参考 `rescale()` 映射回 640x480 报告，RESULT 流帧追加 `src_w/src_h`。
 
 采集线程只保留最新一帧（单槽，队列上界 1），推理侧拷贝即消费；因此每帧周期跟随 10fps 相机。启动前需把 `param/sc132gs` 放到运行目录（或软链），运行需 `--dump-frame` 可把一帧 NPU 视角的 416x416 快照写到 `/tmp/camera_frame.yuv420sp`（注意该参数要放在 positional 参数之外，否则会被当成 output_dir）。
+
+#### 主机端接收相机结果
+
+样例目录下执行（默认 `BOARD_IP=192.168.1.101`、`REPEAT=30`，可用环境变量覆盖）：
+
+```sh
+chmod +x host/camera_stream.sh
+REPEAT=30 ./host/camera_stream.sh
+```
+
+脚本内部 `ssh` 板端、以 `camera` + `stream=1` 启动样例，stdout 协议帧管道进 `host/npu_stream_receiver.py`，然后打印：A/B 结果条数与每帧时延、检测框总数与含框帧数、`src_w/src_h`、seq gap 与重同步/CRC 检查，并展示前 3 个有检测框的帧。输出落在 `camera_stream_out/results.jsonl` 与 `camera_stream_logs/`。认证方式与 `benchmark_stream.sh` 相同（主机能 `ssh root@192.168.1.101`，密码登录时终端会提示输入）。
 
 板端实测（相机模式，stream=1，3000 帧约 5 分钟）：每帧 `duration_us` 平均 99.9ms（冷启动首帧约 37ms，后续稳定约 100ms，无 >150ms 帧）；整机 CPU 平均 13.1%（峰值 53%）；进程 CPU 平均单核 15.2%；RSS 启动后稳定在约 11.8MB，最后 250s 无单调增长；主机端 6000/6000 条结果、0 次重同步/CRC 错误/丢帧；`/data` 与 `/tmp` 占用在运行前后不变。左右原生帧 ΔPTS 平均 0-1μs（硬件主从同步），远小于 16.6ms 容差。跑相机模式前若 `sample_comm_vi_start_vi` 报 `get dev_handle failed`，说明上一次异常退出残留了 VI 句柄，先执行 `/opt/ompmod/load_lq560v100 -a` 重置媒体栈再重跑。
