@@ -20,7 +20,7 @@
 #define STEREO_YOLO_NMS_THRESH  (0.2f)
 #define STEREO_YOLO_CROP_Y      (60)   /* detection region offset in the left frame */
 #define STEREO_YOLO_CROP_H      (960)  /* detection region height in the left frame */
-#define STEREO_YOLO_FONT_SCALE  (2)    /* 5x7 glyph -> 10x14 px */
+#define STEREO_YOLO_FONT_SCALE  (3)    /* 5x7 glyph -> 15x21 px (readable at 1080p) */
 #define STEREO_YOLO_DISP_CROP_Y (92)   /* sensor-level top crop of the 640x448 map */
 #define STEREO_YOLO_DISP_MIN_Q5 (16)   /* <0.5px disparity: too far/unreliable */
 

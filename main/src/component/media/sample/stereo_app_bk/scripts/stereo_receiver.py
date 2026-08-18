@@ -127,16 +127,21 @@ MODEL_INPUT_W = 640
 MODEL_INPUT_H = 448
 MODEL_INPUT_SIZE = MODEL_INPUT_W * MODEL_INPUT_H * 3  # 860160 bytes (RGB888 planar)
 
-# Display dimensions (disparity displayed at native transmitted resolution)
-DISPARITY_DISP_W = DISPARITY_W   # 640
-DISPARITY_DISP_H = DISPARITY_H   # 448
-DISP_IMG_W = 640                # camera image display width (downsampled for display)
-DISP_IMG_H = 448                # camera image display height
+# Display dimensions: right camera keeps 640x448; the left (detection) camera
+# is enlarged so box labels/distance stay readable; the disparity panel is
+# shrunk to ~2/3 of its native 640x448.
+DISPARITY_DISP_W = 427           # 640 * 2/3
+DISPARITY_DISP_H = 299           # 448 * 2/3
+DISP_IMG_W = 640                 # right camera display width
+DISP_IMG_H = 448                 # right camera display height
+LEFT_DISP_W = 960                # left camera display width (1.5x)
+LEFT_DISP_H = 672                # left camera display height (1.5x)
+TOP_ROW_W = LEFT_DISP_W + DISP_IMG_W   # 1600
 
 # Disparity panel placement in composite image (for mouse click mapping)
-# Layout: top row (Left 640x448 | Right 640x448) + bottom (Disparity 640x448 centered in 1280)
-DISP_PANEL_OFFSET_X = (DISP_IMG_W * 2 - DISPARITY_DISP_W) // 2  # 320 (centered in 1280)
-DISP_PANEL_OFFSET_Y = 28 + DISP_IMG_H + 28  # label_l(28) + left_h(DISP_IMG_H) + label_d(28)
+# Layout: top row (Left 960x672 | Right 640x448) + bottom (Disparity centered)
+DISP_PANEL_OFFSET_X = (TOP_ROW_W - DISPARITY_DISP_W) // 2
+DISP_PANEL_OFFSET_Y = 28 + LEFT_DISP_H + 28
 
 # Triangulation window size for averaging
 MEASURE_WINDOW = 9  # 9x9 window
@@ -297,16 +302,17 @@ class StereoReceiver:
         self._disp_lut = self._build_disp_lut()
 
         # Cache label bars (static text — avoid recreating 3 arrays every frame)
-        self._label_l = make_label_bar("Left Camera", DISP_IMG_W, 28)
+        self._label_l = make_label_bar("Left Camera", LEFT_DISP_W, 28)
         self._label_r = make_label_bar("Right Camera", DISP_IMG_W, 28)
         self._label_d = make_label_bar(
             f"Disparity ({DISPARITY_DISP_W}x{DISPARITY_DISP_H} Q5, JET norm=0..{DISPARITY_MAX_DISP})",
-            DISP_IMG_W * 2, 28)
+            TOP_ROW_W, 28)
 
         # Pre-allocate composite buffer. Eliminates ~15 MB/frame of temporary
-        # vstack/hstack allocations. Layout: 1280×952 images + 320×952 info = 1600×952.
-        self._comp_h = 28 + DISP_IMG_H + 28 + DISPARITY_DISP_H  # 952
-        self._comp_w = DISP_IMG_W * 2 + INFO_PANEL_W             # 1600
+        # vstack/hstack allocations. Layout: top 1600x672 images + disparity
+        # row + right info panel.
+        self._comp_h = 28 + LEFT_DISP_H + 28 + DISPARITY_DISP_H  # 1027
+        self._comp_w = TOP_ROW_W + INFO_PANEL_W                  # 1920
         self._composite = np.empty((self._comp_h, self._comp_w, 3), dtype=np.uint8)
 
         # Current disparity reference (copy deferred to mouse-click handler)
@@ -534,8 +540,8 @@ class StereoReceiver:
         if left is None or right is None:
             return None
 
-        # ── Resize to display size (1280x1080 → 640x448) ──
-        left_disp  = cv2.resize(left, (DISP_IMG_W, DISP_IMG_H))
+        # ── Resize to display size: left enlarged, right at 640x448 ──
+        left_disp  = cv2.resize(left, (LEFT_DISP_W, LEFT_DISP_H))
         right_disp = cv2.resize(right, (DISP_IMG_W, DISP_IMG_H))
 
         # ── Disparity pseudocolor via pre-computed LUT (single indexed lookup) ──
@@ -545,32 +551,32 @@ class StereoReceiver:
             disp_color = cv2.applyColorMap(disparity.astype(np.uint8), cv2.COLORMAP_JET)
         else:
             disp_color = disparity
+        if (disp_color.shape[0], disp_color.shape[1]) != (DISPARITY_DISP_H, DISPARITY_DISP_W):
+            disp_color = cv2.resize(disp_color, (DISPARITY_DISP_W, DISPARITY_DISP_H))
 
         # ── Build composite in pre-allocated buffer (no vstack/hstack) ──
         buf = self._composite
         LABEL_H  = 28
-        IMG_W    = DISP_IMG_W         # 640
-        IMG_H    = DISP_IMG_H         # 448
-        BOT_W    = IMG_W * 2          # 1280
-        BOT_H    = DISPARITY_DISP_H   # 448
-        OFFSET_X = (BOT_W - DISPARITY_DISP_W) // 2  # 320 (centered)
+        TOP_W    = TOP_ROW_W          # 1600
+        OFFSET_X = (TOP_W - DISPARITY_DISP_W) // 2
 
         y = 0
         # Top labels (cached)
-        buf[y:y+LABEL_H, 0:IMG_W]    = self._label_l
-        buf[y:y+LABEL_H, IMG_W:BOT_W] = self._label_r
+        buf[y:y+LABEL_H, 0:LEFT_DISP_W] = self._label_l
+        buf[y:y+LABEL_H, LEFT_DISP_W:TOP_W] = self._label_r
         y += LABEL_H
-        # Camera images
-        buf[y:y+IMG_H, 0:IMG_W]     = left_disp
-        buf[y:y+IMG_H, IMG_W:BOT_W] = right_disp
-        y += IMG_H
+        # Camera images: left enlarged; right top-aligned with dark padding
+        buf[y:y+LEFT_DISP_H, 0:LEFT_DISP_W] = left_disp
+        buf[y:y+DISP_IMG_H, LEFT_DISP_W:TOP_W] = right_disp
+        buf[y+DISP_IMG_H:y+LEFT_DISP_H, LEFT_DISP_W:TOP_W] = PANEL_COLOR
+        y += LEFT_DISP_H
         # Disparity label (cached)
-        buf[y:y+LABEL_H, 0:BOT_W] = self._label_d
+        buf[y:y+LABEL_H, 0:TOP_W] = self._label_d
         y += LABEL_H
-        # Disparity panel (centered in 1280-wide bottom row)
+        # Disparity panel (centered in the bottom row)
         disp_y = y
-        buf[y:y+BOT_H, 0:BOT_W] = PANEL_COLOR
-        buf[y:y+BOT_H, OFFSET_X:OFFSET_X+DISPARITY_DISP_W] = disp_color
+        buf[y:y+DISPARITY_DISP_H, 0:TOP_W] = PANEL_COLOR
+        buf[y:y+DISPARITY_DISP_H, OFFSET_X:OFFSET_X+DISPARITY_DISP_W] = disp_color
 
         # Store current disparity reference (no copy — deferred to mouse-click)
         self._current_disparity = disparity
@@ -581,7 +587,7 @@ class StereoReceiver:
             r = self.measure_result
             dx = OFFSET_X + int(mx * DISPARITY_DISP_W / DISPARITY_W)
             dy = disp_y + int(my * DISPARITY_DISP_H / DISPARITY_H)
-            win_half = (MEASURE_WINDOW // 2) * (DISPARITY_DISP_W // DISPARITY_W)
+            win_half = int((MEASURE_WINDOW // 2) * DISPARITY_DISP_W / DISPARITY_W)
             cv2.rectangle(buf,
                           (dx - win_half, dy - win_half),
                           (dx + win_half, dy + win_half),
@@ -600,7 +606,7 @@ class StereoReceiver:
                     continue
                 (tw, th), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                 tx = max(OFFSET_X, min(dx - tw // 2, OFFSET_X + DISPARITY_DISP_W - tw))
-                ty = max(15, min(y_text, disp_y + BOT_H - 5))
+                ty = max(15, min(y_text, disp_y + DISPARITY_DISP_H - 5))
                 cv2.rectangle(buf, (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2),
                               (0, 0, 0), -1)
                 cv2.putText(buf, line, (tx, ty),
@@ -650,7 +656,7 @@ class StereoReceiver:
             'drop_count':   self._drop_count,
         }
         info_panel = draw_info_panel(info, INFO_PANEL_W, self._comp_h)
-        buf[:, BOT_W:BOT_W + INFO_PANEL_W] = info_panel
+        buf[:, TOP_W:TOP_W + INFO_PANEL_W] = info_panel
 
         return buf
 

@@ -581,6 +581,8 @@ python3 main/src/component/media/sample/stereo_app_bk/scripts/stereo_receiver.py
   --host 192.168.1.101 --port 9000
 ```
 
+接收器布局：左视图放大到 960×672（带检测框/距离，板端字体内置 3× 放大更清晰），右视图保持 640×448，视差图缩小到 427×299（约原尺寸 2/3）；窗口过大时加 `--scale 0.8` 整体缩放。
+
 #### 实测基线（板端，2026-08-18）
 
 - 输出帧率**固定为检测通道的 10fps**（npu 线程每帧阻塞等新检测帧，实测 10.02fps 稳定）：每帧都重画最新检测框，避免 19fps JPEG 与 10fps yolo 错拍导致的框频闪；单颗 NPU 串行执行 stereo(~48ms)+yolo(~14ms)，10fps 周期内有余量。
