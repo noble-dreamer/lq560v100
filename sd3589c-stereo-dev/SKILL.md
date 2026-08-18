@@ -28,7 +28,7 @@ VI(SC132GS 1080×1280 @20fps × 2, DIRECT_SLAVE FSIN触发)
 
 **保留**: PERF_START/PERF_END 宏不涉及 I/O，仅将耗时存入全局变量 `g_perf_npu_ms`/`g_perf_sub_ms`，通过网络 JSON 帧传输给上位机显示。
 
-**验证**: 板端 `/data/stereo_debug/stereo_run.log` 为 0 字节，`stereo_app.log` 不创建，stdout 无输出。
+**验证**: `STEREO_LOG`/FPS 统计不再输出；但 stdout 仍有不受影响的第三方输出：`media deinit success!`、`vrb config success!`、`media init success!`（sample_comm_sys 的 printf）、NPU 运行时的 `model verification successful`/`LoadFromMem` 等 Debug 行，以及非致命的 `crypto_ioctl failed 0x13200007`。因此模块8 的“成功日志标志”依然可用于启动验证。
 
 ### CVE identity map 双缓冲（uint8 RGB888 直传 + 闪烁修复）
 
@@ -864,6 +864,7 @@ media init success!                              # 媒体初始化（含 stereo_
 model verification successful                    # NPU 模型解密+校验成功
 load model success.                              # NPU 模型加载成功
 ```
+注意：上述标志来自 sample_comm_sys 的 printf 与 NPU 运行时，不经过被禁用的 `stereo_log_write()`，因此“运行时日志已禁用”后仍会打印；板端无输出反而说明启动在更早阶段失败。
 
 ### 已知问题与注意事项
 - **crypto_ioctl failed 0x13200007**: cipher 库内部非致命警告，不影响 HMAC/AES 结果，可忽略
