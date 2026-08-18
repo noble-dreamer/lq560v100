@@ -912,6 +912,7 @@ cd /opt/stereo && ./run.sh &
 - 检测线程单槽最新帧 + 互斥锁/条件变量，**拷贝即消费**；npu 线程非阻塞取槽（有则 yolo，无则跳过），19fps stereo 主循环不会被 10fps 检测率拖慢。
 - 左帧是 YVU420SP（fmt 221），UV 行 stride=1280 字节，chroma 偏移 = `phys_addr[1]-phys_addr[0]`。USER 帧画框用 `ot_smr_mmap` + 写回 `ot_smr_flush_cache`，否则 VENC DMA 读不到。画框顺序必须在 npu_proc 推入 venc 队列之前。
 - 框坐标映射：`x_l=x*1280/416`、`y_l=60+(y-52)*960/312`，越界截断；框色按 class_id 用黄金角色相生成不同饱和色（RGB→BT.601 YUV），框内原图不动（勿把框内 UV 填 128，否则亮场景下框内会发灰白）。
+- 框中心距离：取框左右边缘中点在视差图（640×448，左图 x/2、y=(y-92)/2 映射）上采两个端点 Q5，线性拟合中点 → `Z_mm=fx_disp·baseline_mm/(q5/32)`，画「X.XXm」于框中央；q5<16（<0.5px，过远）或端点越界不显示。fx_disp=P1.fx/2、baseline 从 `/opt/stereo/stereo_calib.json` 读，与 receiver 同一套换算保证一致。
 
 ### 实测基线（2026-08-18）
 

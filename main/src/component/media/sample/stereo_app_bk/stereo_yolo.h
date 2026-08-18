@@ -52,9 +52,14 @@ ot_u32 stereo_yolo_decode(stereo_yolo_box_t *boxes, ot_u32 max_boxes);
  * the box interior is left untouched. Each class gets its own saturated
  * outline color (golden-angle hue -> YUV), and a "CLASS_NAME SCORE" label
  * (5x7 bitmap font, class-colored background, adaptive text) is drawn at
- * each box top-left. */
+ * each box top-left. If disp_q5 (640x448 uint16 Q5) is provided, the stereo
+ * disparity is sampled at the box's left/right edge midpoints, linearly
+ * interpolated to the center point and converted to distance
+ * (Z = fx*baseline/disp); "X.XXm" is drawn centered in the box when valid. */
+void stereo_yolo_set_depth_calib(float fx_disp, float baseline_mm);
 void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
-                           const ot_eis_img_frame *left);
+                           const ot_eis_img_frame *left,
+                           const ot_u16 *disp_q5, ot_u32 disp_w, ot_u32 disp_h);
 
 #ifdef __cplusplus
 }

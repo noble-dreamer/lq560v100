@@ -378,6 +378,20 @@ ot_s32 stereo_media_sys_init(void)
         g_yolo_enabled = OT_FALSE;
     } else {
         g_yolo_enabled = OT_TRUE;
+        double fx_orig = 0.0;
+        double cx_orig = 0.0;
+        double cy_orig = 0.0;
+        double baseline_mm = 0.0;
+        if (stereo_network_get_calib(&fx_orig, &cx_orig, &cy_orig,
+                                     &baseline_mm) == OT_SUCCESS) {
+            /* fx at 640x448 disparity space = fx_orig / (1280/640) */
+            stereo_yolo_set_depth_calib(
+                (float)(fx_orig / ((double)STEREO_SENSOR_WIDTH /
+                                   STEREO_DISP_OUTPUT_W)),
+                (float)baseline_mm);
+        } else {
+            STEREO_LOG("depth calib parse failed, boxes show no distance\n");
+        }
     }
 
     /* CVE init */
@@ -1367,7 +1381,10 @@ static void *stereo_npu_proc(void *p)
             if (yret == OT_SUCCESS) {
                 ot_u32 kept = stereo_yolo_decode(g_yolo_boxes, STEREO_YOLO_MAX_BOX);
                 if (kept > 0) {
-                    stereo_yolo_draw_left(g_yolo_boxes, kept, &out->left_full);
+                    stereo_yolo_draw_left(g_yolo_boxes, kept, &out->left_full,
+                                          (const ot_u16 *)out->disparity,
+                                          STEREO_DISP_OUTPUT_W,
+                                          STEREO_DISP_OUTPUT_H);
                 }
             }
         }

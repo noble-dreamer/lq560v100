@@ -48,6 +48,14 @@ ot_s32 stereo_network_send(const stereo_venc_output_t *output);
 ot_s32 stereo_network_send_calib(void);
 
 /**
+ * @brief Parse /opt/stereo/stereo_calib.json and return the raw rectified
+ *        intrinsics (P1 fx/cx/cy at sensor resolution) and baseline in mm.
+ *        Same values used to build the calib frame sent to the receiver.
+ */
+ot_s32 stereo_network_get_calib(double *fx_orig, double *cx_orig,
+                                double *cy_orig, double *baseline_mm);
+
+/**
  * @brief Write debug log to NFS mount.
  */
 void stereo_network_write_log(ot_u32 frame_index, ot_u64 timestamp_us,

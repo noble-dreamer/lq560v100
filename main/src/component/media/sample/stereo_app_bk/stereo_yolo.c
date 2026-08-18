@@ -21,6 +21,8 @@
 #define STEREO_YOLO_CROP_Y      (60)   /* detection region offset in the left frame */
 #define STEREO_YOLO_CROP_H      (960)  /* detection region height in the left frame */
 #define STEREO_YOLO_FONT_SCALE  (2)    /* 5x7 glyph -> 10x14 px */
+#define STEREO_YOLO_DISP_CROP_Y (92)   /* sensor-level top crop of the 640x448 map */
+#define STEREO_YOLO_DISP_MIN_Q5 (16)   /* <0.5px disparity: too far/unreliable */
 
 typedef struct {
     ot_avp_handle        handle;
@@ -35,6 +37,8 @@ typedef struct {
 
 static stereo_yolo_ctx_t  g_yolo;
 static ot_bool            g_yolo_inited = OT_FALSE;
+static float              g_depth_fx = 0.0f;         /* fx in 640x448 disp space */
+static float              g_depth_baseline = 0.0f;   /* baseline in mm */
 
 static ot_s32 stereo_yolo_prepare_io(ot_bool is_output)
 {
@@ -418,8 +422,8 @@ static const char *const stereo_yolo_class_names[STEREO_YOLO_CLASS_NUM] = {
     "SCISSORS", "TEDDY BEAR", "HAIR DRIER", "TOOTHBRUSH",
 };
 
-/* 5x7 bitmap font, LSB-aligned rows: A-Z, 0-9, '.', ' ' */
-static const ot_u8 stereo_yolo_font[38][7] = {
+/* 5x7 bitmap font, LSB-aligned rows: A-Z, 0-9, '.', ' ', 'm' */
+static const ot_u8 stereo_yolo_font[39][7] = {
     {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, /* A */
     {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, /* B */
     {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}, /* C */
@@ -458,6 +462,7 @@ static const ot_u8 stereo_yolo_font[38][7] = {
     {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, /* 9 */
     {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C}, /* . */
     {0x00,0x00,0x00,0x00,0x00,0x00,0x00}, /* space */
+    {0x00,0x00,0x1B,0x15,0x15,0x15,0x15}, /* m */
 };
 
 static const ot_u8 *stereo_yolo_glyph(char ch)
@@ -470,6 +475,9 @@ static const ot_u8 *stereo_yolo_glyph(char ch)
     }
     if (ch == '.') {
         return stereo_yolo_font[36];
+    }
+    if (ch == 'm') {
+        return stereo_yolo_font[38];
     }
     return stereo_yolo_font[37]; /* space for unknown chars */
 }
@@ -499,6 +507,106 @@ static void stereo_yolo_class_color(ot_u32 class_id, ot_u8 *cy, ot_u8 *cu, ot_u8
                   0.439f * b * 255.0f + 0.5f);
     *cv = (ot_u8)(128.0f + 0.439f * r * 255.0f - 0.368f * g * 255.0f -
                   0.071f * b * 255.0f + 0.5f);
+}
+
+void stereo_yolo_set_depth_calib(float fx_disp, float baseline_mm)
+{
+    g_depth_fx = fx_disp;
+    g_depth_baseline = baseline_mm;
+}
+
+/* Sample the Q5 disparity at the box's left/right edge midpoints and linearly
+   interpolate to the box center; return the distance in meters or -1. */
+static float stereo_yolo_depth_at_box(const ot_u16 *disp, ot_u32 dw, ot_u32 dh,
+                                      ot_s32 x1, ot_s32 x2, ot_s32 y1, ot_s32 y2)
+{
+    ot_s32 cy = (y1 + y2) / 2;
+    ot_s32 dy = (cy - STEREO_YOLO_DISP_CROP_Y) / 2;
+    ot_s32 dxl = x1 / 2;
+    ot_s32 dxr = x2 / 2;
+    ot_u32 ql = 0;
+    ot_u32 qr = 0;
+    ot_bool vl = (dxl >= 0 && dxl < (ot_s32)dw && dy >= 0 && dy < (ot_s32)dh);
+    ot_bool vr = (dxr >= 0 && dxr < (ot_s32)dw && dy >= 0 && dy < (ot_s32)dh);
+    ot_u32 qm;
+    float disp_real;
+
+    if (disp == NULL || g_depth_fx <= 0.0f || g_depth_baseline <= 0.0f) {
+        return -1.0f;
+    }
+    if (vl) {
+        ql = disp[(ot_u32)dy * dw + (ot_u32)dxl];
+    }
+    if (vr) {
+        qr = disp[(ot_u32)dy * dw + (ot_u32)dxr];
+    }
+    if (vl && vr) {
+        qm = (ql + qr) / 2;      /* linear fit midpoint = mean of endpoints */
+    } else if (vl) {
+        qm = ql;
+    } else if (vr) {
+        qm = qr;
+    } else {
+        return -1.0f;
+    }
+    if (qm < STEREO_YOLO_DISP_MIN_Q5) {
+        return -1.0f;            /* invalid or too far to trust */
+    }
+    disp_real = (float)qm / 32.0f;                       /* Q5 -> pixel */
+    return g_depth_fx * g_depth_baseline / disp_real / 1000.0f;
+}
+
+/* Dark pill + white glyphs, centered at (cx0, cy0). */
+static void stereo_yolo_draw_text_center(ot_u8 *y, ot_u8 *vu, ot_u32 sy, ot_u32 suv,
+                                         ot_s32 cx0, ot_s32 cy0, const char *text,
+                                         ot_u32 w, ot_u32 h)
+{
+    const ot_u32 scale = STEREO_YOLO_FONT_SCALE;
+    const ot_u32 cw = 6 * scale;
+    const ot_u32 th = 7 * scale + 2 * scale;
+    ot_u32 tw = (ot_u32)strlen(text) * cw + scale;
+    ot_s32 bx = cx0 - (ot_s32)tw / 2;
+    ot_s32 by = cy0 - (ot_s32)th / 2;
+
+    if (bx < 0) {
+        bx = 0;
+    }
+    if (bx + (ot_s32)tw >= (ot_s32)w) {
+        bx = (ot_s32)w - (ot_s32)tw - 1;
+    }
+    if (by < 0) {
+        by = 0;
+    }
+    if (by + (ot_s32)th >= (ot_s32)h) {
+        by = (ot_s32)h - (ot_s32)th - 1;
+    }
+
+    for (ot_s32 r = by; r < by + (ot_s32)th; r++) {
+        for (ot_s32 c = bx; c < bx + (ot_s32)tw; c++) {
+            ot_u8 *vp = vu + (ot_u32)(r / 2) * suv + (ot_u32)(c / 2) * 2;
+            y[(ot_u32)r * sy + (ot_u32)c] = 16;
+            vp[0] = 128;
+            vp[1] = 128;
+        }
+    }
+    for (ot_u32 i = 0; text[i] != '\0'; i++) {
+        const ot_u8 *g = stereo_yolo_glyph(text[i]);
+        ot_s32 gx = bx + (ot_s32)(i * cw + scale);
+        for (ot_u32 row = 0; row < 7; row++) {
+            for (ot_u32 col = 0; col < 5; col++) {
+                if (!(g[row] & (1u << (4 - col)))) {
+                    continue;
+                }
+                for (ot_u32 dy2 = 0; dy2 < scale; dy2++) {
+                    for (ot_u32 dx = 0; dx < scale; dx++) {
+                        ot_s32 px = gx + (ot_s32)(col * scale + dx);
+                        ot_s32 py = by + (ot_s32)(scale + row * scale + dy2);
+                        y[(ot_u32)py * sy + (ot_u32)px] = 255;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /* Class-colored background + adaptive-contrast glyphs on the Y plane. */
@@ -558,7 +666,8 @@ static void stereo_yolo_draw_label(ot_u8 *y, ot_u8 *vu, ot_u32 sy, ot_u32 suv,
 }
 
 void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
-                           const ot_eis_img_frame *left)
+                           const ot_eis_img_frame *left,
+                           const ot_u16 *disp_q5, ot_u32 disp_w, ot_u32 disp_h)
 {
     const ot_u32 outline = 4;
     ot_void *map = NULL;
@@ -650,6 +759,20 @@ void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
             snprintf(label, sizeof(label), "%s %.2f", name, boxes[b].score);
             stereo_yolo_draw_label(y, vu, sy, suv, x1, ly, label, w, h,
                                    cy, cu, cv);
+        }
+
+        /* Stereo distance at the box center, only for boxes with a valid
+           disparity (endpoint linear fit -> midpoint), drawn centered. */
+        {
+            float depth_m = stereo_yolo_depth_at_box(disp_q5, disp_w, disp_h,
+                                                     x1, x2, y1, y2);
+            if (depth_m > 0.0f) {
+                char dtext[32];
+
+                snprintf(dtext, sizeof(dtext), "%.2fm", depth_m);
+                stereo_yolo_draw_text_center(y, vu, sy, suv, (x1 + x2) / 2,
+                                             (y1 + y2) / 2, dtext, w, h);
+            }
         }
     }
 

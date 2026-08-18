@@ -586,6 +586,7 @@ python3 main/src/component/media/sample/stereo_app_bk/scripts/stereo_receiver.py
 - 输出帧率**固定为检测通道的 10fps**（npu 线程每帧阻塞等新检测帧，实测 10.02fps 稳定）：每帧都重画最新检测框，避免 19fps JPEG 与 10fps yolo 错拍导致的框频闪；单颗 NPU 串行执行 stereo(~48ms)+yolo(~14ms)，10fps 周期内有余量。
 - 检测通道 416×312 YUV420SP(180)、stride 416/416、10.0fps；letterbox 灰边与 camera.c 逐字节一致。
 - 每个检测框左上角画「COCO 类别名 + 置信度」标签（内置 5×7 位图字体，类别色底 + 自适应黑白字）；框按 label 取不同饱和色（黄金角色相→YUV），框内原图内容不再去色。
+- 每个框中心用双目视差算距离并画「X.XXm」：取框左右边缘中点两个端点做线性拟合得中心视差值，按 `Z=fx·baseline/disp`（fx 用 640×448 空间的标定值，视差为 Q5/32）换算，无效视差或过远的框不显示。
 - 5 分钟连续运行（155 采样/310s）：进程 RSS 稳定在 ~12.0MB（末 60s 持平，无单调增长），MemAvailable 9.4~25MB 无 OOM；CPU 均值/稳态 ~43% 单核。
 
 #### M2 零代码双模型内存探针（主机+板端执行，验证后清场）

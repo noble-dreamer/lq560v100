@@ -362,6 +362,16 @@ ot_s32 stereo_network_send_calib(void)
     return ret;
 }
 
+ot_s32 stereo_network_get_calib(double *fx_orig, double *cx_orig,
+                                double *cy_orig, double *baseline_mm)
+{
+    if (fx_orig == NULL || cx_orig == NULL || cy_orig == NULL ||
+        baseline_mm == NULL) {
+        return OT_FAILURE;
+    }
+    return parse_calib_file(fx_orig, cx_orig, cy_orig, baseline_mm);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Debug log to LOCAL tmpfs (NFS removed to avoid D-state hang)                */
 /* -------------------------------------------------------------------------- */
