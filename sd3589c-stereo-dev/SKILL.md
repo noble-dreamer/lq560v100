@@ -187,28 +187,32 @@ out->disp_bytes = up_w * up_h * sizeof(ot_u16);  // 614400 bytes
 | license文件 | `/opt/stereo/license.bin`（64B，设备绑定授权） |
 | auth_gen | `/tmp/auth_gen`（临时部署，运行后可删除） |
 | scene参数 | `/opt/stereo/param/sc132gs/` |
-| 源码 | `software/lq560v100_sdk/main/src/component/media/sample/stereo_app/` |
+| 源码 | `main/src/component/media/sample/stereo_app_bk/`（当前仓库布局，SDK 根=仓库根） |
+| 模型源文件 | 仓库根 `stereo_s_ori_h448_w640_128_sub_v1.7_e300_sim.ortm`（明文，加密后部署） |
+| 交叉工具链 | `/opt/linux/x86-arm/aarch64-otv02-linux-gnu-gcc/bin`（备选 `/home/lzx/gcc-aarch64-otv02-linux-gnu/aarch64-otv02-linux-gnu-gcc/bin`） |
 
 ## 构建与部署
 
 ```bash
-# 推荐：项目脚本编译并部署（需要 Docker 或等价交叉编译环境）
-cd software/lq560v100_sdk && bash build_stereo_app.sh
+# 当前仓库没有 build_stereo_app.sh，直接用本机交叉工具链编译：
+cd /home/lzx/lq560v100_sdk
+export PATH=/opt/linux/x86-arm/aarch64-otv02-linux-gnu-gcc/bin:$PATH
+SDK=/home/lzx/lq560v100_sdk
 
-# build_stereo_app.sh 部署内容：
-# - /opt/stereo/stereo_app（仅二进制）
-# 标定文件和 LUT 需手动部署，避免覆盖已有标定结果
+# 注意顺序：stereo 的 clean 会连带删除 common 的 .o，所以先 clean stereo 再 build common
+make -C main/src/component/media/sample/stereo_app_bk clean
+make -C main/src/component/media/sample/common clean
+make -C main/src/component/media/sample/common COMMON_DIR=$SDK/main/src/component/media/sample/common
+# 用 stereo_app 目标（而非 all/install）避免把产物拷进 userfs
+make -C main/src/component/media/sample/stereo_app_bk COMMON_DIR=$SDK/main/src/component/media/sample/common stereo_app
+make -C main/src/component/media/sample/stereo_app_bk COMMON_DIR=$SDK/main/src/component/media/sample/common auth_gen
 
-# Docker 不可用时，可使用本地交叉工具链编译 stereo_app：
-export PATH=/home/xiao/dev_ws/V100/SD3589CV100/SD3589C_SDK_V100R001C00SPC001/software/gcc-aarch64-otv02-linux-gnu/aarch64-otv02-linux-gnu-gcc/bin:$PATH
-make -C software/lq560v100_sdk/main/src/component/media/sample/common
-make -C software/lq560v100_sdk/main/src/component/media/sample/stereo_app \
-  COMMON_DIR=/home/xiao/dev_ws/V100/SD3589CV100/SD3589C_SDK_V100R001C00SPC001/software/lq560v100_sdk/main/src/component/media/sample/common
-
-# 手动部署二进制、1280×1080标定和双输出模型：
-sshpass -p "123456" scp stereo_app root@192.168.1.101:/opt/stereo/stereo_app
-sshpass -p "123456" scp software/相机参数/stereo_calib.json root@192.168.1.101:/opt/stereo/stereo_calib.json
-sshpass -p "123456" scp software/双输出立体匹配模型/two_output_stereo_s_ori_h416_w640_96_e301_sim_model_calib5_act_kld_asym_wgt_mse_asym_perch.ortm root@192.168.1.101:/data/model/stereo_match.ortm
+# 手动部署二进制、1280×1080 标定和 LUT：
+sshpass -p "123456" scp main/src/component/media/sample/stereo_app_bk/stereo_app root@192.168.1.101:/opt/stereo/stereo_app
+sshpass -p "123456" scp main/src/component/media/sample/stereo_app_bk/scripts/stereo_calib.json root@192.168.1.101:/opt/stereo/stereo_calib.json
+sshpass -p "123456" scp main/src/component/media/sample/stereo_app_bk/scripts/lut_left.bin root@192.168.1.101:/opt/stereo/lut_left.bin
+sshpass -p "123456" scp main/src/component/media/sample/stereo_app_bk/scripts/lut_right.bin root@192.168.1.101:/opt/stereo/lut_right.bin
+# 模型必须按“模块8”用板端 UID 加密，再部署为 /data/model/stereo_match.ortm.enc
 
 # 运行完整链路
 sshpass -p "123456" ssh root@192.168.1.101 "cd /opt/stereo && ./stereo_app"
@@ -216,6 +220,8 @@ sshpass -p "123456" ssh root@192.168.1.101 "cd /opt/stereo && ./stereo_app"
 # 运行raw-only原始图像采集链路
 sshpass -p "123456" ssh root@192.168.1.101 "cd /opt/stereo && ./stereo_app --raw-only"
 ```
+
+**板端存储**: 加密模型约 27.5MB，`/data` 是 UBIFS 且总容量只有约 35MB。空间不足时删除 `/data/npu_demo` 下旧的 abab demo 模型（mobilenetv2/tiny-yolov3）、bin 与 lib 中的构建产物（均可从 SDK 重编），用 `df -k /data` 确认余量后再上传模型。
 
 **坑**: 完整链路每次测试前建议 `reboot` 板子。若 VENC 通道残留（kill -9 后未正常 deinit），`ot_eis_venc_chn_create()` 会返回 `0x80080052`（VENC_EXIST）。当前代码已增加自动恢复机制：检测到 chn0 创建失败时，自动执行 `ot_eis_venc_exit()` + `ot_eis_venc_init()` + 重试创建。raw-only 不启动 VENC，可用于绕开 VENC 资源冲突并快速验证 VI/ISP/raw capture。
 
@@ -343,8 +349,8 @@ python3 stereo_receiver.py --host 192.168.1.101 --capture-raw --show-raw
 
 ### 生成与部署
 ```bash
-cd software/lq560v100_sdk/main/src/component/media/sample/stereo_app/scripts
-/home/xiao/miniconda3/bin/python generate_xylut.py \
+cd main/src/component/media/sample/stereo_app_bk/scripts
+python3 generate_xylut.py \
   --calib captured/calib_result/stereo_calib.json \
   --out-left lut_left.bin \
   --out-right lut_right.bin \
@@ -393,7 +399,7 @@ sshpass -p "123456" scp lut_right.bin root@192.168.1.101:/opt/stereo/lut_right.b
 ### 双输出模型
 - Input 0: left 640×448 RGB888 planar (uint8, DTC Preprocess handles -128)
 - Input 1: right 640×448 RGB888 planar
-- Output 0 (larger): cost volume [96, 224, 320] uint8 (~6.9MB)
+- Output 0 (larger): cost volume [128, 224, 320] uint8 (~9.2MB)（当前 v1.7 模型；旧 96 通道模型已不用）
 - Output 1 (smaller): integer disparity [224, 320] uint8 (~70KB)
 - 输出通过 size 自动检测: 大的是 cost, 小的是 disp
 
@@ -596,16 +602,15 @@ static FORCE_INLINE unsigned int LZ4_NbCommonBytes(register size_t val)
 ```
 
 ### 标定文件来源
-- 仓库基准文件：`software/相机参数/stereo_calib.json`
+- 仓库基准文件：`main/src/component/media/sample/stereo_app_bk/scripts/stereo_calib.json`
 - 板端运行文件：`/opt/stereo/stereo_calib.json`
-- `build_stereo_app.sh` 应优先部署 `software/相机参数/stereo_calib.json`
 
 ---
 
 ## 模块7: 上位机 Receiver（stereo_receiver.py）
 
 ### 核心文件
-- `software/lq560v100_sdk/main/src/component/media/sample/stereo_app/receiver/stereo_receiver.py` — 主接收脚本
+- `main/src/component/media/sample/stereo_app_bk/scripts/stereo_receiver.py` — 主接收脚本
 
 ### 网络协议帧类型
 
@@ -821,38 +826,36 @@ static const unsigned char STEREO_SEC_MASTER_KEY[32] = { ... };  // 共享密钥
 ### 编译
 ```bash
 # auth_gen (ARM aarch64, 交叉编译)
-export PATH=.../aarch64-otv02-linux-gnu-gcc/bin:$PATH
-make -C software/lq560v100_sdk/main/src/component/media/sample/stereo_app auth_gen \
-  COMMON_DIR=.../sample/common
+export PATH=/opt/linux/x86-arm/aarch64-otv02-linux-gnu-gcc/bin:$PATH
+make -C main/src/component/media/sample/stereo_app_bk COMMON_DIR=$SDK/main/src/component/media/sample/common auth_gen
 
-# encrypt_model (x86_64, 本机编译)
-make -C software/lq560v100_sdk/main/src/component/media/sample/stereo_app/tools/host
-# 若系统缺少 libssl-dev，Makefile 自动回退到 miniconda3 OpenSSL
-# 运行时需: LD_LIBRARY_PATH=/home/xiao/miniconda3/lib
+# encrypt_model (x86_64, 本机编译；系统 OpenSSL 可用时无需额外 LD_LIBRARY_PATH)
+make -C main/src/component/media/sample/stereo_app_bk/tools/host
 ```
 
 ### 部署与验证流程
 ```bash
 # 1. 部署 stereo_app 和 auth_gen 到板端
-sshpass -p root scp stereo_app root@192.168.1.101:/opt/stereo/stereo_app
-sshpass -p root scp auth_gen root@192.168.1.101:/tmp/auth_gen
+sshpass -p 123456 scp stereo_app root@192.168.1.101:/opt/stereo/stereo_app
+sshpass -p 123456 scp auth_gen root@192.168.1.101:/tmp/auth_gen
 
 # 2. 板端运行 auth_gen 获取 UID 并生成 license.bin
-sshpass -p root ssh root@192.168.1.101 "chmod +x /tmp/auth_gen && /tmp/auth_gen"
+sshpass -p 123456 ssh root@192.168.1.101 "chmod +x /tmp/auth_gen && /tmp/auth_gen"
 # 输出: UID:f4245ac778e6c321178728a40a03d8d46f9e030007000000
 # 副产物: /opt/stereo/license.bin (64B)
 
 # 3. 上位机用 UID 加密模型
-LD_LIBRARY_PATH=/home/xiao/miniconda3/lib ./encrypt_model \
-  stereo_s_ori_h448_w640_96_sub_e300_v1.3_sim.ortm \
+./encrypt_model \
+  /home/lzx/lq560v100_sdk/stereo_s_ori_h448_w640_128_sub_v1.7_e300_sim.ortm \
   /tmp/stereo_match.ortm.enc \
-  f4245ac778e6c321178728a40a03d8d46f9e030007000000
+  <auth_gen 输出的 UID>
 
-# 4. 部署加密模型到板端
-sshpass -p root scp /tmp/stereo_match.ortm.enc root@192.168.1.101:/data/model/
+# 4. 部署加密模型到板端（目录不存在时先创建）
+sshpass -p 123456 ssh root@192.168.1.101 "mkdir -p /data/model"
+sshpass -p 123456 scp /tmp/stereo_match.ortm.enc root@192.168.1.101:/data/model/
 
 # 5. 运行 stereo_app 验证
-sshpass -p root ssh root@192.168.1.101 "cd /opt/stereo && ./stereo_app"
+sshpass -p 123456 ssh root@192.168.1.101 "cd /opt/stereo && ./stereo_app"
 ```
 
 ### 成功日志标志
