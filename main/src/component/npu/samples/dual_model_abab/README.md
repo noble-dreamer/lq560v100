@@ -459,16 +459,16 @@ cd /data/npu_demo
 
 位置参数依次为 `<modelA> <inputA> <modelB> <inputB> <repeat> <output_dir> <stream> <camera_fps>`，相机模式取值如下：
 
-| 位置    | 参数名     | 含义                 | 示例值                           | 说明                                                          |
-| ------- | ---------- | -------------------- | -------------------------------- | ------------------------------------------------------------- |
-| argv[1] | modelA     | A 模型文件           | `mobilenetv2_rgbplanar_b.ortm` | 分类模型，继续走文件输入，不参与相机                          |
-| argv[2] | inputA     | A 模型输入文件       | `ILSVRC2012_val_00024327.rgb`  | 同上，文件输入                                                |
-| argv[3] | modelB     | B 模型文件           | `tiny-yolov3_yuv420sp_b.ortm`  | 必须查询出`detect-yolov3` 类型，否则报错退出                |
-| argv[4] | inputB     | B 模型输入           | `camera`                       | 写`camera` 才启用相机模式，其余值按文件路径处理             |
-| argv[5] | repeat     | 推理帧数             | `3000`                         | 相机下每帧约 100ms，3000 帧约 5 分钟；`0` 视为 `1`        |
-| argv[6] | output_dir | 落盘目录（可选）     | `none`                         | 仅`stream=0` 时生效；`stream>=1` 时被忽略，不写 `/data` |
+| 位置    | 参数名     | 含义                 | 示例值                           | 说明                                                                                    |
+| ------- | ---------- | -------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
+| argv[1] | modelA     | A 模型文件           | `mobilenetv2_rgbplanar_b.ortm` | 分类模型，继续走文件输入，不参与相机                                                    |
+| argv[2] | inputA     | A 模型输入文件       | `ILSVRC2012_val_00024327.rgb`  | 同上，文件输入                                                                          |
+| argv[3] | modelB     | B 模型文件           | `tiny-yolov3_yuv420sp_b.ortm`  | 必须查询出`detect-yolov3` 类型，否则报错退出                                          |
+| argv[4] | inputB     | B 模型输入           | `camera`                       | 写`camera` 才启用相机模式，其余值按文件路径处理                                       |
+| argv[5] | repeat     | 推理帧数             | `3000`                         | 相机下每帧约 100ms，3000 帧约 5 分钟；`0` 视为 `1`                                  |
+| argv[6] | output_dir | 落盘目录（可选）     | `none`                         | 仅`stream=0` 时生效；`stream>=1` 时被忽略，不写 `/data`                           |
 | argv[7] | stream     | 流级别（可选）       | `3`                            | `0`=不流式，`1`=只发结果，`2`=结果+压缩 tensor，`3`=结果+相机图像（仅相机模式） |
-| argv[8] | camera_fps | 检测通道帧率（可选） | `10`                           | FRC 目标帧率，范围 1..30，默认 10，超出按 30 封顶             |
+| argv[8] | camera_fps | 检测通道帧率（可选） | `10`                           | FRC 目标帧率，范围 1..30，默认 10，超出按 30 封顶                                       |
 
 可选开关：`--dump-frame` 会把一帧 NPU 视角的 416x416 快照写到 `/tmp/camera_frame.yuv420sp`。它可放在任意位置，但建议放在所有位置参数之后；若恰好落在 argv[6] 位置会被同时当成 `output_dir`，触发落盘模式。
 
@@ -510,10 +510,98 @@ BOARD_FPS=20 BOARD_PASSWORD=<密码> ./host/run_gui.sh
 
 实测（stream=3，每档 300 帧：主机收全 300 图像 + 600 结果，0 次重同步/CRC/丢帧）：
 
-| camera_fps | 全程平均接收率 | 有效带宽 | 整机 CPU 均值/峰值 | 进程 CPU 均值/峰值 | RSS 均值/峰值 |
-| --- | --- | --- | --- | --- | --- |
-| 10 | 9.1 fps | 1.8 MB/s | 15.6% / 51% | 22.7% / 26% | 12.0 / 12.2 MB |
-| 20 | 16.6 fps | 3.2 MB/s | 24.8% / 54% | 30.3% / 33% | 11.6 / 12.1 MB |
-| 30 | 23.2 fps | 4.5 MB/s | 33.0% / 54% | 39.1% / 45% | 11.6 / 12.3 MB |
+| camera_fps | 全程平均接收率 | 有效带宽 | 整机 CPU 均值/峰值 | 进程 CPU 均值/峰值 | RSS 均值/峰值  |
+| ---------- | -------------- | -------- | ------------------ | ------------------ | -------------- |
+| 10         | 9.1 fps        | 1.8 MB/s | 15.6% / 51%        | 22.7% / 26%        | 12.0 / 12.2 MB |
+| 20         | 16.6 fps       | 3.2 MB/s | 24.8% / 54%        | 30.3% / 33%        | 11.6 / 12.1 MB |
+| 30         | 23.2 fps       | 4.5 MB/s | 33.0% / 54%        | 39.1% / 45%        | 11.6 / 12.3 MB |
 
 与同 10fps 的 stream=1（进程 CPU 约 15.2%）相比，每帧 194KB 图像的 CRC+拷贝+SSH 写入约增加 7.5% 单核。30fps 时 RNDIS→Windows→WSL 链路先于板端成为瓶颈（板端 30fps 正常出帧，主机只收到约 23fps，链路实际吞吐约 4.5MB/s），推荐 10/20fps；30fps 仅作带宽上限参考。GUI 与 `camera_stream.sh`、stream=1/2、文件输入模式互不影响。
+
+### 十、stereo_app 双模型集成（stereo 深度 + tiny-yolov3 检测，plan 3.6）
+
+`plan.md` 的 3.6 已落地：在 `main/src/component/media/sample/stereo_app_bk/` 的 stereo_app 上扩展第二模型 tiny-yolov3（左目 VPROC chn2 检测通道 416×312@10fps → letterbox 416×416 → NPU ABAB 异步调度 → 检测框画进左图 JPEG）。上位机 `stereo_receiver.py` 与 TCP9000 协议**零改动**，左图直接带红框、右图/视差不变。本目录 `dual_model_abab` 的 SSH 流式传输未改动。
+
+#### 构建（主机 WSL2 执行，源码 `/home/lzx/lq560v100_sdk`）
+
+```sh
+cd /home/lzx/lq560v100_sdk
+export PATH=/opt/linux/x86-arm/aarch64-otv02-linux-gnu-gcc/bin:$PATH
+SDK=/home/lzx/lq560v100_sdk
+# 注意顺序：stereo clean 会连带删 common 的 .o，所以先 clean stereo 再 clean/build common
+make -C main/src/component/media/sample/stereo_app_bk clean
+make -C main/src/component/media/sample/common clean
+make -C main/src/component/media/sample/common COMMON_DIR=$SDK/main/src/component/media/sample/common
+make -C main/src/component/media/sample/stereo_app_bk COMMON_DIR=$SDK/main/src/component/media/sample/common stereo_app
+```
+
+#### 部署（主机执行，SSH root@192.168.1.101，密码 123456）
+
+```sh
+sshpass -p 123456 scp \
+  main/src/component/media/sample/stereo_app_bk/stereo_app \
+  root@192.168.1.101:/opt/stereo/stereo_app
+# yolo 模型只部署一次（9MB，UBIFS 压缩后占 /opt 约 6.2MB）：
+sshpass -p 123456 ssh root@192.168.1.101 "mkdir -p /opt/model"
+sshpass -p 123456 scp \
+  /home/lzx/npu_toolchain/common/samples/tiny-yolov3_yuv420sp/tiny-yolov3_yuv420sp_b.ortm \
+  root@192.168.1.101:/opt/model/tiny-yolov3_yuv420sp_b.ortm
+```
+
+板端资产约定：stereo 加密模型 `/data/model/stereo_match.ortm.enc`（28MB，每次启动解密到 `/tmp/stereo_plain.ortm`、load 后即删）；yolo 明文 `/opt/model/tiny-yolov3_yuv420sp_b.ortm`（`/data` 装不下第二个模型，改放 `/opt`，重启不丢）；标定/LUT/license 在 `/opt/stereo/`。yolo 模型缺失时 stereo_app 自动降级纯 stereo，不会崩溃。
+
+#### 运行（板端执行）
+
+```sh
+cd /opt/stereo && ./stereo_app          # 完整双模型链路，TCP 9000 出流
+cd /opt/stereo && ./stereo_app --raw-only   # 仅 VI + 9001 raw capture（回归用）
+# 停止：kill -INT $(pgrep -f stereo_app)；异常残留时 /opt/ompmod/load_lq560v100 -a
+```
+
+#### 显示（主机 WSL2 执行）
+
+```sh
+python3 main/src/component/media/sample/stereo_app_bk/scripts/stereo_receiver.py \
+  --host 192.168.1.101 --port 9000
+```
+
+#### 实测基线（板端，2026-08-18）
+
+- stereo 主链路 ~19.2fps / NPU ~48ms / SubPixel ~1.3ms；接入 yolo 后 ~18.3fps（单颗 NPU 串行执行 yolo ~14ms，yolo 只在其有检测新帧时触发）。
+- 检测通道 416×312 YUV420SP(180)、stride 416/416、10.0fps；letterbox 灰边与 camera.c 逐字节一致。
+- 5 分钟连续运行（155 采样/310s）：进程 RSS 稳定在 ~12.0MB（末 60s 持平，无单调增长），MemAvailable 9.4~25MB 无 OOM；CPU 均值/稳态 ~43% 单核。
+
+#### M2 零代码双模型内存探针（主机+板端执行，验证后清场）
+
+```sh
+# 主机：生成合成双目输入（左 640x448 RGB planar + 右=左移24px），输出 0.bin/1.bin
+python3 - <<'PY'
+import numpy as np
+H,W=448,640
+p=np.random.default_rng(42).integers(0,48,(H,W),dtype=np.uint8)
+p=p+np.uint8(np.arange(W)[None,:]*0.3)
+q=np.zeros_like(p); q[:,:W-24]=p[:,24:]
+np.concatenate([p.ravel(),p.ravel(),p.ravel()]).astype(np.uint8).tofile('/tmp/stereo_probe_input/0.bin')
+np.concatenate([q.ravel(),q.ravel(),q.ravel()]).astype(np.uint8).tofile('/tmp/stereo_probe_input/1.bin')
+PY
+# 主机：上传 binary/模型/输入（板端 /tmp 是 50.7MB RAM 盘，只放模型与输入）
+sshpass -p 123456 scp main/src/component/npu/samples/dual_model_abab/sample_dual_model_abab root@192.168.1.101:/opt/dual_probe_bin
+sshpass -p 123456 scp /home/lzx/lq560v100_sdk/stereo_s_ori_h448_w640_128_sub_v1.7_e300_sim.ortm root@192.168.1.101:/tmp/stereo_s.ortm
+sshpass -p 123456 scp /home/lzx/npu_toolchain/common/samples/tiny-yolov3_yuv420sp/tiny-yolov3_yuv420sp_b.ortm root@192.168.1.101:/tmp/tiny_yolo_b.ortm
+sshpass -p 123456 ssh root@192.168.1.101 "mkdir -p /tmp/probe_in"
+sshpass -p 123456 scp /tmp/stereo_probe_input/0.bin /tmp/stereo_probe_input/1.bin root@192.168.1.101:/tmp/probe_in/
+# 板端：多输入目录必须带后缀命名 0.bin/1.bin；repeat=1 落盘跑一次 ABAB
+sshpass -p 123456 ssh root@192.168.1.101 \
+  "/opt/dual_probe_bin /tmp/stereo_s.ortm /tmp/probe_in /tmp/tiny_yolo_b.ortm \
+   /data/npu_demo/input/COCO_val2014_000000568213.yuv420sp 1 /tmp/probe_out"
+```
+
+探针结论（实测）：stereo = 2 输入（640×448 RGB planar）+ **1 输出 F32 [224,320]**（半分辨率视差，非计划假设的 cost+disp 双输出）；合成对视差 320×224 空间均值 ≈12.06 = 输入空间 24px；两模型共驻无 OOM（稳态 RSS ~2MB，加载期 VmPeak ~127MB）。运行后清掉 `/opt/dual_probe_bin` 与 `/tmp/{stereo_s.ortm,tiny_yolo_b.ortm,probe_in,probe_out}`，把 tmpfs 还给 RAM。
+
+#### 关键坑（3.6 新增，均已实测）
+
+- **`ot_avp_npu_load_model_from_mem` 的模型走异步 trigger/wait 会永久卡在 wait**（同步 execute 正常）；必须把明文解密成文件再用 `ot_avp_npu_load_model` 加载，load 后即可 unlink。
+- NPU 输出不要用 `ot_avp_npu_malloc` 逐元素读：F32 视差 286KB 的标量扫描要 ~18ms/帧；保留 SMR cached 输出 + `ot_smr_flush_cache` 才是 ~1.3ms。
+- VPROC chn 级 crop 在 **chn 缩放之后**生效：先把全幅 1080×1280 缩到竖版 352×416，再 crop (20,0,312,416) 等效源空间 960×1280@x=60；crop 坐标写源空间会得到 416×252 的错误输出。
+- 检测通道 attr 竖版 312×416（270° 旋转交换宽高、height 16 对齐）、compress_mode=NONE；FRC 按实际传感器速率写 src=30、dst=10（本 app 名义 20fps 但实测出帧 ~30fps，src=20 会得到 15fps）。
+- 左帧是 YVU420SP（fmt 221），UV 行 stride=1280（字节），chroma 偏移 = `phys_addr[1]-phys_addr[0]`；USER 帧画框后必须 `ot_smr_flush_cache` 写回，否则 VENC DMA 读不到。

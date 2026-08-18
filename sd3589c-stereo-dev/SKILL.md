@@ -890,6 +890,41 @@ cd /opt/stereo && ./run.sh &
 
 ---
 
+## 模块9: 双模型集成（stereo 深度 + tiny-yolov3 检测，plan 3.6）
+
+### 功能定位
+
+在 stereo_app 现有 VI/VPROC(XY-LUT)/CVE/NPU/SubPixel/VENC/TCP9000 管线上扩展第二模型 tiny-yolov3：左 VPROC group 新增 chn2 检测通道（416×312 YUV420SP@10fps），letterbox 416×416 喂 yolo；NPU 改双模型 ABAB 异步调度（trigger stereo → trigger yolo → wait stereo → wait yolo）；检测框映射回左目 1280×1080 后由板端画进左图 JPEG，上位机 receiver 零改动。
+
+### 核心文件
+
+- `stereo_yolo.c/h` — yolo 模型加载、IO 运行时查询、416×312→416×416 letterbox 预处理、就地解码+NMS、画框。
+- `stereo_npu.c/h` — stereo 模型改 trigger/wait 两段接口（`stereo_npu_trigger`/`stereo_npu_wait`），`thread_num=2`。
+- `stereo_sec.c/h` — `stereo_sec_decrypt_model_to_file()`：加密模型解密成临时明文文件。
+- `stereo_media.c` — chn2 检测通道配置 + 检测线程（单槽最新帧）+ npu 线程 ABAB 接线。
+
+### 非协商 API 事实（均已板端实测）
+
+- **`ot_avp_npu_load_model_from_mem` 的模型走异步 trigger/wait 会永久卡在 wait**（同步 execute 正常）。必须解密成 `/tmp/stereo_plain.ortm` 文件、`ot_avp_npu_load_model` 加载，load 后立即 unlink。yolo 明文模型在 `/opt/model/tiny-yolov3_yuv420sp_b.ortm`（`/data` 放不下）。
+- NPU 输出禁整块拷贝、禁逐元素读 `ot_avp_npu_malloc` 内存：F32 视差 286KB 标量扫描 ~18ms/帧；保留 SMR cached 输出 + `ot_smr_flush_cache` 为 ~1.3ms。yolo 输出走 stride 对齐的就地懒读（先读 objectness，过阈才读 85 值组）。
+- VPROC chn 级 crop 在 **chn 缩放之后**生效：全幅 1080×1280 先缩到竖版 352×416，再 chn crop (20,0,312,416) 等效源空间 960×1280@x=60；把 crop 写成源空间坐标会得到 416×252 错误输出。
+- 检测通道 attr 竖版 312×416（270° 交换宽高、height 16 对齐）、`compress_mode=NONE`、FRC src=30 dst=10。本 app 名义 20fps 但实测传感器出帧 ~30fps，src=20 会得到 15fps。
+- 检测线程单槽最新帧 + 互斥锁/条件变量，**拷贝即消费**；npu 线程非阻塞取槽（有则 yolo，无则跳过），19fps stereo 主循环不会被 10fps 检测率拖慢。
+- 左帧是 YVU420SP（fmt 221），UV 行 stride=1280 字节，chroma 偏移 = `phys_addr[1]-phys_addr[0]`。USER 帧画框用 `ot_smr_mmap` + 写回 `ot_smr_flush_cache`，否则 VENC DMA 读不到。画框顺序必须在 npu_proc 推入 venc 队列之前。
+- 框坐标映射：`x_l=x*1280/416`、`y_l=60+(y-52)*960/312`，越界截断；红框 Y=76/V=170/U=90，框内 UV=128。
+
+### 实测基线（2026-08-18）
+
+- stereo 19.2fps / NPU 48ms / SubPixel 1.3ms；yolo 接入后 18.3fps（单 NPU 串行，yolo ~14ms 且仅在有检测新帧时触发），yolo 10.0fps。
+- 5 分钟连续运行（155 采样/310s）：RSS 稳定 12.0MB（末 60s 持平），MemAvailable 9.4~25MB，CPU ~43% 单核。
+- M2 探针实测：stereo 模型 = 2 输入 + **1 输出 F32 [224,320]**（半分辨率视差，非早期文档的 cost+disp 双输出）；合成对视差输出空间均值 12.06 = 输入空间 24px。
+
+### 构建/部署/运行
+
+与「构建与部署」一致，只多一步 yolo 模型部署（见 dual_model_abab README「十」的完整命令）。
+
+---
+
 ## 常见错误码
 
 | 错误码 | 含义 | 解决方案 |
@@ -919,7 +954,7 @@ cd /opt/stereo && ./run.sh &
 | VI帧获取 | ~50ms (20fps) | FSIN触发 |
 | VPROC+XY-LUT | <5ms | GDC硬件查表, DMA占用约144MB/s |
 | CVE预处理+XOR map | <4ms | 硬件加速 (resize+crop+CSC+map×6) |
-| NPU推理 | **~47ms** | 双输出模型 h448 + cache flush |
+| NPU推理 | **~47ms** | v1.7 128-sub 模型 + cache flush |
 | SubPixel | **~1.4ms** | 整数算术 + 批量行 + prefetch |
 | VENC | <5ms | MJPEG硬编码, qfactor=75 |
 | 网络传输 | ~2ms | TCP本地, q=75时~440KB/帧 |
@@ -928,7 +963,7 @@ cd /opt/stereo && ./run.sh &
 ### 当前验证基线
 - 成功标志：左右均出现 `set_gdc(XY-LUT) OK`、`set_xylut OK` 和 `XY-LUT stereo rectification applied`
 - 角点验证：当前实拍靶标按 `9×6` 内角点检测，直接测板端输出图 `mean|dy|≈1.0px`
-- 双输出模型标志：`model loaded: 2 inputs, 2 outputs`
+- 模型标志：`model loaded: 2 inputs, 1 outputs`（v1.7 128-sub 为单输出 F32 视差；历史双输出模型才打印 2 outputs）
 - 25秒运行可达到约 `total frames=400+`
 
 ---
