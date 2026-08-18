@@ -911,7 +911,7 @@ cd /opt/stereo && ./run.sh &
 - 检测通道 attr 竖版 312×416（270° 交换宽高、height 16 对齐）、`compress_mode=NONE`、FRC src=30 dst=10。本 app 名义 20fps 但实测传感器出帧 ~30fps，src=20 会得到 15fps。
 - 检测线程单槽最新帧 + 互斥锁/条件变量，**拷贝即消费**；npu 线程非阻塞取槽（有则 yolo，无则跳过），19fps stereo 主循环不会被 10fps 检测率拖慢。
 - 左帧是 YVU420SP（fmt 221），UV 行 stride=1280 字节，chroma 偏移 = `phys_addr[1]-phys_addr[0]`。USER 帧画框用 `ot_smr_mmap` + 写回 `ot_smr_flush_cache`，否则 VENC DMA 读不到。画框顺序必须在 npu_proc 推入 venc 队列之前。
-- 框坐标映射：`x_l=x*1280/416`、`y_l=60+(y-52)*960/312`，越界截断；红框 Y=76/V=170/U=90，框内 UV=128。
+- 框坐标映射：`x_l=x*1280/416`、`y_l=60+(y-52)*960/312`，越界截断；框色按 class_id 用黄金角色相生成不同饱和色（RGB→BT.601 YUV），框内原图不动（勿把框内 UV 填 128，否则亮场景下框内会发灰白）。
 
 ### 实测基线（2026-08-18）
 

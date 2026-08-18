@@ -16,7 +16,7 @@
 
 #define STEREO_YOLO_CLASS_NUM   (80)
 #define STEREO_YOLO_ANCHOR_NUM  (3)
-#define STEREO_YOLO_OBJ_THRESH  (0.6f)
+#define STEREO_YOLO_OBJ_THRESH  (0.4f)
 #define STEREO_YOLO_NMS_THRESH  (0.2f)
 #define STEREO_YOLO_CROP_Y      (60)   /* detection region offset in the left frame */
 #define STEREO_YOLO_CROP_H      (960)  /* detection region height in the left frame */
@@ -474,10 +474,38 @@ static const ot_u8 *stereo_yolo_glyph(char ch)
     return stereo_yolo_font[37]; /* space for unknown chars */
 }
 
-/* Dark background + white scaled glyphs on the Y plane; neutral chroma. */
+/* One saturated, well-separated color per class id (golden-angle hue),
+   converted RGB -> YUV (full-range BT.601). */
+static void stereo_yolo_class_color(ot_u32 class_id, ot_u8 *cy, ot_u8 *cu, ot_u8 *cv)
+{
+    float hue = (float)((class_id * 137u) % 360u);
+    float h = hue / 60.0f;
+    ot_s32 i = (ot_s32)h % 6;
+    float f = h - (ot_s32)h;
+    float q = 1.0f - f;
+    float r, g, b;
+
+    switch (i) {
+        case 0: r = 1.0f; g = f;   b = 0.0f; break;
+        case 1: r = q;   g = 1.0f; b = 0.0f; break;
+        case 2: r = 0.0f; g = 1.0f; b = f;   break;
+        case 3: r = 0.0f; g = q;   b = 1.0f; break;
+        case 4: r = f;   g = 0.0f; b = 1.0f; break;
+        default: r = 1.0f; g = 0.0f; b = q;  break;
+    }
+    *cy = (ot_u8)(16.0f + 0.257f * r * 255.0f + 0.504f * g * 255.0f +
+                  0.098f * b * 255.0f + 0.5f);
+    *cu = (ot_u8)(128.0f - 0.148f * r * 255.0f - 0.291f * g * 255.0f +
+                  0.439f * b * 255.0f + 0.5f);
+    *cv = (ot_u8)(128.0f + 0.439f * r * 255.0f - 0.368f * g * 255.0f -
+                  0.071f * b * 255.0f + 0.5f);
+}
+
+/* Class-colored background + adaptive-contrast glyphs on the Y plane. */
 static void stereo_yolo_draw_label(ot_u8 *y, ot_u8 *vu, ot_u32 sy, ot_u32 suv,
                                    ot_s32 x0, ot_s32 y0, const char *text,
-                                   ot_u32 w, ot_u32 h)
+                                   ot_u32 w, ot_u32 h,
+                                   ot_u8 cy, ot_u8 cu, ot_u8 cv)
 {
     const ot_u32 scale = STEREO_YOLO_FONT_SCALE;
     const ot_u32 cw = 6 * scale;       /* 5px glyph + 1px gap */
@@ -485,6 +513,7 @@ static void stereo_yolo_draw_label(ot_u8 *y, ot_u8 *vu, ot_u32 sy, ot_u32 suv,
     ot_u32 tw = (ot_u32)strlen(text) * cw + scale;
     ot_s32 bx = x0;
     ot_s32 by = y0;
+    ot_u8 ty = (cy > 128) ? 16 : 255; /* dark text on bright bg, vice versa */
 
     if (bx + (ot_s32)tw >= (ot_s32)w) {
         bx = (ot_s32)w - (ot_s32)tw - 1;
@@ -502,9 +531,9 @@ static void stereo_yolo_draw_label(ot_u8 *y, ot_u8 *vu, ot_u32 sy, ot_u32 suv,
     for (ot_s32 r = by; r < by + (ot_s32)th; r++) {
         for (ot_s32 c = bx; c < bx + (ot_s32)tw; c++) {
             ot_u8 *vp = vu + (ot_u32)(r / 2) * suv + (ot_u32)(c / 2) * 2;
-            y[(ot_u32)r * sy + (ot_u32)c] = 16;
-            vp[0] = 128;
-            vp[1] = 128;
+            y[(ot_u32)r * sy + (ot_u32)c] = cy;
+            vp[0] = cv;
+            vp[1] = cu;
         }
     }
 
@@ -520,7 +549,7 @@ static void stereo_yolo_draw_label(ot_u8 *y, ot_u8 *vu, ot_u32 sy, ot_u32 suv,
                     for (ot_u32 dx = 0; dx < scale; dx++) {
                         ot_s32 px = gx + (ot_s32)(col * scale + dx);
                         ot_s32 py = by + (ot_s32)(scale + row * scale + dy);
-                        y[(ot_u32)py * sy + (ot_u32)px] = 255;
+                        y[(ot_u32)py * sy + (ot_u32)px] = ty;
                     }
                 }
             }
@@ -531,7 +560,7 @@ static void stereo_yolo_draw_label(ot_u8 *y, ot_u8 *vu, ot_u32 sy, ot_u32 suv,
 void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
                            const ot_eis_img_frame *left)
 {
-    const ot_u32 outline = 3;
+    const ot_u32 outline = 4;
     ot_void *map = NULL;
     ot_u32 map_size;
     ot_u64 c_off;
@@ -584,7 +613,11 @@ void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
             continue;
         }
 
-        /* Red rectangle outline on Y + chroma, gray chroma inside the box */
+        /* Per-class colored rectangle outline; the box interior is left
+           untouched so the object remains visible and no longer goes gray. */
+        ot_u8 cy, cu, cv;
+        stereo_yolo_class_color(boxes[b].class_id, &cy, &cu, &cv);
+
         for (ot_s32 r = y1; r <= y2; r++) {
             for (ot_s32 c = x1; c <= x2; c++) {
                 ot_bool border =
@@ -593,13 +626,9 @@ void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
                 ot_u8 *vp = vu + (ot_u32)(r / 2) * suv + (ot_u32)(c / 2) * 2;
 
                 if (border) {
-                    y[(ot_u32)r * sy + (ot_u32)c] = 76;
-                    /* YVU order: V=170, U=90 -> saturated red */
-                    vp[0] = 170;
-                    vp[1] = 90;
-                } else {
-                    vp[0] = 128;
-                    vp[1] = 128;
+                    y[(ot_u32)r * sy + (ot_u32)c] = cy;
+                    vp[0] = cv;  /* V first in YVU order */
+                    vp[1] = cu;
                 }
             }
         }
@@ -619,7 +648,8 @@ void stereo_yolo_draw_left(const stereo_yolo_box_t *boxes, ot_u32 box_count,
                 ly = y1 + 2;
             }
             snprintf(label, sizeof(label), "%s %.2f", name, boxes[b].score);
-            stereo_yolo_draw_label(y, vu, sy, suv, x1, ly, label, w, h);
+            stereo_yolo_draw_label(y, vu, sy, suv, x1, ly, label, w, h,
+                                   cy, cu, cv);
         }
     }
 
