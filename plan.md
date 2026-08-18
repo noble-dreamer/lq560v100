@@ -158,3 +158,118 @@
 - 新模型与 stereo_app 同系列（RGB planar 直传 + 模型内 DTC），输入约定沿用 stereo_types.h 的 640×448。
 - `_sim` 命名不代表仅模拟器可用：stereo_app 的板端模型即由 `*_sim.ortm` 加密而来。
 - 本期不做 subpixel/LZ4/VENC/加密，视差 v1 用模型原始整数输出。
+
+# 3.6 stereo_app 双模型集成（stereo 深度 + tiny-yolov3 检测）计划
+
+## 摘要
+
+在 `stereo_app_bk` 现有 VI/VPROC(含 XY-LUT)/CVE/NPU/SubPixel/VENC/TCP9000 管线上扩展第二模型 tiny-yolov3：左目新增 VPROC 检测通道（960×1280@x=60 → 270° 旋转 → 416×312 YUV420SP，FRC 20→10），letterbox 到 416×416 喂 yolo；NPU 改双模型 ABAB 异步调度；检测框映射回左目 1280×1080 后由板端直接画进左目 YUV 帧，随现有 JPEG/TCP9000 链路发送。上位机 `stereo_receiver.py` 与现有传输/编码协议零改动，不自造协议。
+
+## 关键决策（已锁定）
+
+1. 基座 = 扩展 `stereo_app_bk`，复用现有 VI/VPROC/CVE/VENC/TCP9000 管线，不复用 dual_model_abab 的 SSH 传输。
+2. 检测框在板端画进左目帧，不新增协议帧类型；receiver 零改动，预期左图带框。
+3. NPU 异步化：stereo 由同步 `ot_avp_npu_execute` 改 `trigger/wait` 两段；`config.thread_num=2`；两模型同优先级（MEDIUM），ABAB：trigger A(stereo)→B(yolo)、wait A→B；仅当检测通道有新帧时才 trigger yolo。stereo 保持 ~19fps、yolo ~10fps。
+4. 检测通道：左 VPROC group 加 chn2（仿 dual_model_abab/camera.c）。group crop 是 group 级共享（stereo 主链路占全幅 1080×1280），chn2 必须用 chn 级 crop `ot_eis_vproc_chn_set_crop`（960×1280@x=60），再 270° 旋转输出 416×312 YUV420SP、`compress_mode=NONE`、FRC src=20 dst=10（本 app 传感器 20fps，与 abab 样例 30fps 不同）。
+5. 检测通道 attr 竖屏填写：width=312、height=416（270° 旋转交换宽高；height 必须 16 对齐，否则静默无帧）。
+6. 单槽最新帧 + 互斥锁/条件变量；拷贝即消费（每帧 duration≈1000/fps）；letterbox 上下各 52 行 Y/UV=128 灰边（UV 各 26 行）。
+7. 框坐标映射（416 空间 → 左目 1280×1080）：`x_l = x*1280/416`；`y_l = 60 + (y-52)*960/312`；越界截断。画框用 `phys_addr + ot_smr_mmap`（USER 模式 virt_addr 不可靠），Y 平面画彩色矩形、UV 填 128。
+8. 资源路由：/data 与 /opt 余量不足，yolo 模型(~8.6MB)、运行时 .so、合成输入与探针产物放 /tmp（tmpfs ~51.9MB，重启即失）；stereo 继续用 `/data/model/stereo_match.ortm.enc`。内存不足时按用户授权删除旧分类模型等可重编产物。
+9. 推进顺序：先做零代码双模型内存探针；OOM 立即停止汇报，不继续后续里程碑。
+
+## 实现改动与里程碑（每步 ≤200 行、≤5 文件、编译/验证后立即 commit）
+
+### M1 计划落地（本步）
+
+本计划写入 `plan.md` 并提交。
+
+### M2 零代码双模型内存探针（先决门）
+
+- 停板端 stereo_app：`kill -INT $(pgrep -f stereo_app)`（勿 kill -9，防 VENC 资源残留）。
+- 部署已编译的 `main/src/component/npu/samples/dual_model_abab/sample_dual_model_abab` + 所需运行时 .so 到 `/tmp/lib`；`tiny-yolov3_yuv420sp_b.ortm`、stereo 明文模型 `stereo_s_ori_h448_w640_128_sub_v1.7_e300_sim.ortm`、合成双目输入（目录内文件 `0`/`1` 各 640×448×3 字节）与 yolo 测试帧到 `/tmp`。
+- stereo 走现有 RAW fallback（2 输入目录 + 2 输出落盘），yolo 走文件输入；`repeat=1`、`output_dir=/tmp/probe_out` 跑一次。
+- 验收：双模型共驻、输出非空且正确（yolo RESULT；stereo disp=224×320、cost=128×224×320）、不 OOM。
+- OOM 或输出错误 → 停止并汇报，不进入 M3。
+
+### M3 NPU 异步化 + yolo 骨架
+
+- `stereo_npu.c/h`：增加 trigger/wait 分段接口；init 的 `thread_num=2`。
+- 新增 `stereo_yolo.c/h`：模型加载、IO shape/dtype/stride 运行时查询、416×416 YUV420SP 预处理、yolo 解码+NMS（输出两路 `[1,H,W,255]` F32；先读 objectness、过阈 0.6 再读 85 值组；按 tensor stride 就地懒读取，禁整块拷贝；exp 只算一次；IoU>0.2 抑制）。
+- `stereo_media.c` NPU 线程：ABAB 异步调度，无检测帧时只跑 stereo。
+- 先验证 stereo 原链路不退化（19fps、视差正确）再提交。
+
+### M4 检测通道
+
+- 左 VPROC chn2：chn 级 crop 960×1280@(60,0) + 270° 旋转 + 416×312 YUV420SP + compress_mode=NONE + FRC 20→10；独立 buffer pool；采集线程单槽最新帧。
+- letterbox 到 416×416 喂 yolo（拷贝即消费）。
+- 验收：fmt=180(NV12)、compress=0、stride 416/416、10fps±1；stereo 主链路帧率/视差不退化。
+
+### M5 画框 + 端到端
+
+- 按既定公式把 416 空间框映射回左目 1280×1080。
+- 用 `ot_smr_mmap(phys_addr)` 映射左帧 Y 平面画彩色矩形、UV 填 128；框画在 VENC 编码前。
+- receiver 不改；验收：上位机左图带框、右图/视差/协议不变。
+
+### M6 资源验证 + 文档
+
+- 5min 连续运行，监控 RSS/CPU/free（板端监控脚本从 abab skill assets 复制），确认无内存/磁盘增长。
+- 回归 `--raw-only`。
+- 更新 README 与项目 skill（仅 `sd3589c-stereo-dev/SKILL.md`）。
+
+## 测试计划
+
+- M2：probe 输出成功 + 记录 RSS/free；OOM 即停。
+- M3：stereo 主链路 receiver 19fps±、视差正常；yolo 合成输入输出有效框。
+- M4：检测通道格式/stride/fps 与左右 PTS 配对正常。
+- M5：静态场景左图框位置稳定不闪烁；无新协议帧类型、receiver 日志无异常。
+- M6：RSS 5min 无单调增长；raw-only 采集正常。
+
+## 假设与默认
+
+- yolo `_b.ortm` 明文加载即可；stereo 继续按模块8加密加载。
+- 与 stereo 共驻 OOM 时：先删旧分类模型/可重编产物后重试，仍不足则回报，不硬塞。
+- 检测 FRC 10fps；后续如需更高帧率再调。
+- 画框叠加在 VPROC 输出左帧上，不影响 XY-LUT 矫正坐标与视差测距。
+
+## 交接注意事项（新会话执行前必读）
+
+### 板端现状（2026-08-18 实测）
+
+- stereo_app 仍在运行（PID=1412）；任何 NPU/媒体探针前先 `kill -INT $(pgrep -f stereo_app)`，避免 -9。
+- 内存 total≈101MB，当前 free≈13.8MB / available≈4.9MB（被 stereo_app 占用）；kill 后才有余量。
+- 存储：/data 3.2MB、/opt 7.8MB、/tmp 51.9MB(tmpfs)。yolo 模型/.so/合成输入/探针输出全部放 /tmp；不要写 /data、/opt 新持久文件。
+- 板端资产已就绪并校验：`/opt/stereo/{stereo_app,stereo_calib.json,lut_left.bin,lut_right.bin,license.bin}`、`/data/model/stereo_match.ortm.enc`。
+- SSH：192.168.1.101 root/123456，端口 22（9000 是立体流数据端口，不是 SSH 端口）。本机无 sshpass，用 paramiko。
+
+### 构建与源码
+
+- 仓库根 `/home/lzx/lq560v100_sdk`，分支 `feature/stereo-depth`。
+- 工具链：`export PATH=/opt/linux/x86-arm/aarch64-otv02-linux-gnu-gcc/bin:$PATH`。
+- stereo 编译顺序（stereo clean 会连带删 common 的 .o）：clean stereo_app_bk → clean common → build common → build stereo_app/auth_gen（完整命令见项目 skill「构建与部署」）。
+- 模型：stereo 明文 `/home/lzx/lq560v100_sdk/stereo_s_ori_h448_w640_128_sub_v1.7_e300_sim.ortm`；yolo 板端 `/home/lzx/npu_toolchain/common/samples/tiny-yolov3_yuv420sp/tiny-yolov3_yuv420sp_b.ortm`；样例二进制已存在 `main/src/component/npu/samples/dual_model_abab/sample_dual_model_abab`。
+
+### Skill 使用与恢复
+
+- 项目强制 skill：`sd3589c-stereo-dev/SKILL.md`；双模型参考：`lq560v100-npu-abab-demo`。
+- 动代码前先读 4 份 references：`npu-api-patterns.md` / `board-deploy.md` / `camera-npu-pipeline.md` / `stream-transfer.md`。
+- 更新 skill 只改项目副本 `sd3589c-stereo-dev/SKILL.md`；`~/.codex/skills/...` 个人副本仅同步、不优先。
+- 若 AI 幻觉写坏 skill：用 git 恢复项目副本（先备份真实新增经验的 diff），例如 `git checkout sd3589c-stereo-dev/SKILL.md`。
+
+### Git 规则（AGENTS.md）
+
+- 每步 ≤200 行、≤5 文件；每完成一个小功能且编译/验证通过立即 commit，信息清晰（Gitflow）。
+- 工作区有大量预改 .a 和 untracked 产物；禁 `git add -A`，只提交本任务相关文件。
+
+### 加密规则（模块8，仅按需使用）
+
+- stereo 模型：UID→HMAC-SHA256→AES-CTR-128 加密 + license.bin 设备绑定；本任务 stereo 继续用现成 `/data/model/stereo_match.ortm.enc`，无需重做。
+- 新模型若需加密：板端 `/tmp/auth_gen` 取 UID → 上位机 `tools/host/encrypt_model` 加密 → 部署；换设备必须重做。
+- yolo 明文 `_b.ortm` 直接加载即可，不加密。
+
+### 关键坑点
+
+- NPU 输出按 stride 就地懒读，禁整块拷贝（实测整块拷贝 ~14.5ms/帧）。
+- USER 模式 vproc 帧 virt_addr 不可靠，必须 phys_addr + ot_smr_mmap；chroma 偏移 = phys_addr[1]-phys_addr[0]。
+- 检测通道 attr 竖屏 312×416、height 16 对齐；compress_mode=NONE。
+- 异常退出后媒体句柄残留：`/opt/ompmod/load_lq560v100 -a` 恢复（无需 reboot）。
+- 板端监控脚本从 abab skill `assets/board-scripts/` 原样复制，勿手抄。
