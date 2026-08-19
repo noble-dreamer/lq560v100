@@ -1380,6 +1380,9 @@ static void *stereo_npu_proc(void *p)
             ot_s32 yret = stereo_yolo_wait();
             if (yret == OT_SUCCESS) {
                 ot_u32 kept = stereo_yolo_decode(g_yolo_boxes, STEREO_YOLO_MAX_BOX);
+                stereo_yolo_set_dets(g_yolo_boxes, kept,
+                                     (const ot_u16 *)out->disparity,
+                                     STEREO_DISP_OUTPUT_W, STEREO_DISP_OUTPUT_H);
                 if (kept > 0) {
                     stereo_yolo_draw_left(g_yolo_boxes, kept, &out->left_full,
                                           (const ot_u16 *)out->disparity,

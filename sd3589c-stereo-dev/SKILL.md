@@ -274,6 +274,8 @@ stereo_network_send_packet(g_client_fd, &perf_pkt);
 
 **上位机** (`stereo_receiver.py`): 接收 type=7 帧，解析 JSON，显示在信息面板 NPU/SubPixel/Total 行。
 
+**检测列表透传**：perf JSON 同时携带 `"dets":[[class_id, distance_mm],...]`（板端 `stereo_yolo_set_dets()` 在解码后按框中心端点拟合算好距离，`stereo_network.c` 拼进 perf 帧）。上位机据此在信息面板列「类别: 距离」，无需对左图做任何图像反解。当前显示布局已去掉右视图：左图 1024×864 + 视差 640×448 + 右侧信息面板（1344×1368，可 `--scale`）。
+
 ---
 
 ## 模块0: raw-only 原始图像采集

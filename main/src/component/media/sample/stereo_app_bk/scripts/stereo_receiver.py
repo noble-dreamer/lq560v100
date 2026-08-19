@@ -127,19 +127,16 @@ MODEL_INPUT_W = 640
 MODEL_INPUT_H = 448
 MODEL_INPUT_SIZE = MODEL_INPUT_W * MODEL_INPUT_H * 3  # 860160 bytes (RGB888 planar)
 
-# Display dimensions: right camera keeps 640x448; the left (detection) camera
-# is enlarged so box labels/distance stay readable; the disparity panel is
-# shrunk to ~2/3 of its native 640x448.
-DISPARITY_DISP_W = 427           # 640 * 2/3
-DISPARITY_DISP_H = 299           # 448 * 2/3
-DISP_IMG_W = 640                 # right camera display width
-DISP_IMG_H = 448                 # right camera display height
-LEFT_DISP_W = 960                # left camera display width (1.5x)
-LEFT_DISP_H = 672                # left camera display height (1.5x)
-TOP_ROW_W = LEFT_DISP_W + DISP_IMG_W   # 1600
+# Display layout: right camera is no longer shown; the left (detection)
+# image and the native-resolution disparity map share a single column.
+LEFT_DISP_W = 1024               # left display width (1280x1080 -> 1024x864, 32:27)
+LEFT_DISP_H = 864                # left display height
+DISPARITY_DISP_W = DISPARITY_W   # 640 native
+DISPARITY_DISP_H = DISPARITY_H   # 448 native
+TOP_ROW_W = LEFT_DISP_W          # single image column
 
 # Disparity panel placement in composite image (for mouse click mapping)
-# Layout: top row (Left 960x672 | Right 640x448) + bottom (Disparity centered)
+# Layout: left image on top, disparity centered below it
 DISP_PANEL_OFFSET_X = (TOP_ROW_W - DISPARITY_DISP_W) // 2
 DISP_PANEL_OFFSET_Y = 28 + LEFT_DISP_H + 28
 
@@ -154,6 +151,46 @@ TEXT_COLOR_GREEN  = (0, 255, 0)
 TEXT_COLOR_YELLOW = (0, 255, 255)
 TEXT_COLOR_RED    = (0, 0, 255)
 INFO_PANEL_W      = 320              # right-side info panel width
+
+# COCO 80 class names. The board ships the per-frame detection list
+# (class_id, distance_mm) inside the type-7 perf JSON, so the host only maps
+# the id back to a name — no image reverse-decoding is needed.
+COCO_NAMES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+
+def _class_rgb(cid: int):
+    """Host replica of the board's golden-angle class color (RGB)."""
+    hue = (cid * 137) % 360
+    h = hue / 60.0
+    i = int(h) % 6
+    f = h - int(h)
+    q = 1.0 - f
+    if i == 0:
+        r, g, b = 1.0, f, 0.0
+    elif i == 1:
+        r, g, b = q, 1.0, 0.0
+    elif i == 2:
+        r, g, b = 0.0, 1.0, f
+    elif i == 3:
+        r, g, b = 0.0, q, 1.0
+    elif i == 4:
+        r, g, b = f, 0.0, 1.0
+    else:
+        r, g, b = 1.0, 0.0, q
+    return int(r * 255), int(g * 255), int(b * 255)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -181,7 +218,7 @@ def make_label_bar(text, width, height=30, color=PANEL_COLOR, text_color=TEXT_CO
     return bar
 
 
-def draw_info_panel(info, w=INFO_PANEL_W, h=720):
+def draw_info_panel(info, w=INFO_PANEL_W, h=720, detections=None):
     """Draw the right-side info panel with frame metadata."""
     panel = np.full((h, w, 3), PANEL_COLOR, dtype=np.uint8)
     y = 35
@@ -227,6 +264,27 @@ def draw_info_panel(info, w=INFO_PANEL_W, h=720):
             cv2.putText(panel, value, (110, y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, TEXT_COLOR, 1, cv2.LINE_AA)
         y += dy
+
+    # ── Detections section: class label + distance for every box on the left ──
+    cv2.line(panel, (8, y + 4), (w - 8, y + 4), (80, 80, 80), 1)
+    y += 18
+    if detections:
+        n = len(detections)
+        n_cls = len({d[0] for d in detections})
+        cv2.putText(panel, f"Targets: {n}  Classes: {n_cls}", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, TEXT_COLOR_GREEN, 1, cv2.LINE_AA)
+        y += dy
+        for cid, name, dist in detections:
+            if y > h - 60:
+                break
+            text = f"{name}: {dist:.2f}m" if dist is not None else f"{name}: -- m"
+            b, g, r = _class_rgb(int(cid))
+            cv2.putText(panel, text, (12, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (b, g, r), 1, cv2.LINE_AA)
+            y += 20
+    else:
+        cv2.putText(panel, "Targets: none", (12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, TEXT_COLOR, 1, cv2.LINE_AA)
 
     # Connection status at bottom
     y = h - 45
@@ -303,7 +361,6 @@ class StereoReceiver:
 
         # Cache label bars (static text — avoid recreating 3 arrays every frame)
         self._label_l = make_label_bar("Left Camera", LEFT_DISP_W, 28)
-        self._label_r = make_label_bar("Right Camera", DISP_IMG_W, 28)
         self._label_d = make_label_bar(
             f"Disparity ({DISPARITY_DISP_W}x{DISPARITY_DISP_H} Q5, JET norm=0..{DISPARITY_MAX_DISP})",
             TOP_ROW_W, 28)
@@ -311,8 +368,8 @@ class StereoReceiver:
         # Pre-allocate composite buffer. Eliminates ~15 MB/frame of temporary
         # vstack/hstack allocations. Layout: top 1600x672 images + disparity
         # row + right info panel.
-        self._comp_h = 28 + LEFT_DISP_H + 28 + DISPARITY_DISP_H  # 1027
-        self._comp_w = TOP_ROW_W + INFO_PANEL_W                  # 1920
+        self._comp_h = 28 + LEFT_DISP_H + 28 + DISPARITY_DISP_H  # 1368
+        self._comp_w = TOP_ROW_W + INFO_PANEL_W                  # 1344
         self._composite = np.empty((self._comp_h, self._comp_w, 3), dtype=np.uint8)
 
         # Current disparity reference (copy deferred to mouse-click handler)
@@ -540,9 +597,8 @@ class StereoReceiver:
         if left is None or right is None:
             return None
 
-        # ── Resize to display size: left enlarged, right at 640x448 ──
+        # ── Resize to display size (left only; right is no longer shown) ──
         left_disp  = cv2.resize(left, (LEFT_DISP_W, LEFT_DISP_H))
-        right_disp = cv2.resize(right, (DISP_IMG_W, DISP_IMG_H))
 
         # ── Disparity pseudocolor via pre-computed LUT (single indexed lookup) ──
         if disparity.dtype == np.uint16:
@@ -562,13 +618,10 @@ class StereoReceiver:
 
         y = 0
         # Top labels (cached)
-        buf[y:y+LABEL_H, 0:LEFT_DISP_W] = self._label_l
-        buf[y:y+LABEL_H, LEFT_DISP_W:TOP_W] = self._label_r
+        buf[y:y+LABEL_H, 0:TOP_W] = self._label_l
         y += LABEL_H
-        # Camera images: left enlarged; right top-aligned with dark padding
-        buf[y:y+LEFT_DISP_H, 0:LEFT_DISP_W] = left_disp
-        buf[y:y+DISP_IMG_H, LEFT_DISP_W:TOP_W] = right_disp
-        buf[y+DISP_IMG_H:y+LEFT_DISP_H, LEFT_DISP_W:TOP_W] = PANEL_COLOR
+        # Left camera image (full width of the image column)
+        buf[y:y+LEFT_DISP_H, 0:TOP_W] = left_disp
         y += LEFT_DISP_H
         # Disparity label (cached)
         buf[y:y+LABEL_H, 0:TOP_W] = self._label_d
@@ -655,7 +708,17 @@ class StereoReceiver:
             'capture_count':self.capture_count,
             'drop_count':   self._drop_count,
         }
-        info_panel = draw_info_panel(info, INFO_PANEL_W, self._comp_h)
+        detections = []
+        if self.perf and self.perf.get('dets'):
+            for item in self.perf['dets']:
+                try:
+                    cid = int(item[0])
+                    dist_mm = int(item[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                name = COCO_NAMES[cid] if 0 <= cid < len(COCO_NAMES) else "obj"
+                detections.append((cid, name, dist_mm / 1000.0 if dist_mm > 0 else None))
+        info_panel = draw_info_panel(info, INFO_PANEL_W, self._comp_h, detections)
         buf[:, TOP_W:TOP_W + INFO_PANEL_W] = info_panel
 
         return buf

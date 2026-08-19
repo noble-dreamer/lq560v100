@@ -21,6 +21,7 @@ extern "C" {
 #define STEREO_YOLO_DET_H        (312)
 #define STEREO_YOLO_TOP_PAD      ((STEREO_YOLO_INPUT_DIM - STEREO_YOLO_DET_H) / 2)
 #define STEREO_YOLO_MAX_BOX      (4096)
+#define STEREO_YOLO_MAX_DETS     (64)
 
 typedef struct {
     float   x1, y1, x2, y2;   /* 416x416 model-input space */
@@ -28,6 +29,11 @@ typedef struct {
     ot_u32  class_id;
     ot_bool suppressed;
 } stereo_yolo_box_t;
+
+typedef struct {
+    ot_u32  class_id;
+    ot_s32  distance_mm;      /* -1 = invalid / too far */
+} stereo_yolo_det_t;
 
 ot_s32 stereo_yolo_init(void);
 void   stereo_yolo_deinit(void);
@@ -44,6 +50,12 @@ ot_s32 stereo_yolo_wait(void);
 /* In-place decode + NMS on the stride-aligned outputs. Returns the kept
  * box count; kept boxes are packed at the front of `boxes`. */
 ot_u32 stereo_yolo_decode(stereo_yolo_box_t *boxes, ot_u32 max_boxes);
+
+/* Store the class + triangulated distance for the kept boxes so the network
+   layer can ship them with the perf frame; also clears on empty input. */
+void stereo_yolo_set_dets(const stereo_yolo_box_t *boxes, ot_u32 box_count,
+                          const ot_u16 *disp_q5, ot_u32 disp_w, ot_u32 disp_h);
+ot_u32 stereo_yolo_get_last_dets(stereo_yolo_det_t *dets, ot_u32 max_dets);
 
 /* Map 416x416 boxes to the 1280x1080 left frame (x*1280/416,
  * y=60+(y-52)*960/312, clamped) and draw a colored rectangle outline on the

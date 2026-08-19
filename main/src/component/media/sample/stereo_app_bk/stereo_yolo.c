@@ -39,6 +39,8 @@ static stereo_yolo_ctx_t  g_yolo;
 static ot_bool            g_yolo_inited = OT_FALSE;
 static float              g_depth_fx = 0.0f;         /* fx in 640x448 disp space */
 static float              g_depth_baseline = 0.0f;   /* baseline in mm */
+static stereo_yolo_det_t  g_last_dets[STEREO_YOLO_MAX_DETS];
+static ot_u32             g_last_det_count = 0;
 
 static ot_s32 stereo_yolo_prepare_io(ot_bool is_output)
 {
@@ -554,6 +556,41 @@ static float stereo_yolo_depth_at_box(const ot_u16 *disp, ot_u32 dw, ot_u32 dh,
     }
     disp_real = (float)qm / 32.0f;                       /* Q5 -> pixel */
     return g_depth_fx * g_depth_baseline / disp_real / 1000.0f;
+}
+
+void stereo_yolo_set_dets(const stereo_yolo_box_t *boxes, ot_u32 box_count,
+                          const ot_u16 *disp_q5, ot_u32 disp_w, ot_u32 disp_h)
+{
+    ot_u32 n = (box_count < STEREO_YOLO_MAX_DETS) ? box_count : STEREO_YOLO_MAX_DETS;
+
+    for (ot_u32 b = 0; b < n; b++) {
+        ot_s32 x1 = (ot_s32)(boxes[b].x1 * STEREO_SENSOR_WIDTH /
+                             STEREO_YOLO_INPUT_DIM);
+        ot_s32 x2 = (ot_s32)(boxes[b].x2 * STEREO_SENSOR_WIDTH /
+                             STEREO_YOLO_INPUT_DIM);
+        ot_s32 y1 = (ot_s32)(STEREO_YOLO_CROP_Y +
+                     (boxes[b].y1 - STEREO_YOLO_TOP_PAD) * STEREO_YOLO_CROP_H /
+                     STEREO_YOLO_DET_H);
+        ot_s32 y2 = (ot_s32)(STEREO_YOLO_CROP_Y +
+                     (boxes[b].y2 - STEREO_YOLO_TOP_PAD) * STEREO_YOLO_CROP_H /
+                     STEREO_YOLO_DET_H);
+        float d = stereo_yolo_depth_at_box(disp_q5, disp_w, disp_h,
+                                           x1, x2, y1, y2);
+
+        g_last_dets[b].class_id = boxes[b].class_id;
+        g_last_dets[b].distance_mm = (d > 0.0f) ? (ot_s32)(d * 1000.0f + 0.5f) : -1;
+    }
+    g_last_det_count = n;
+}
+
+ot_u32 stereo_yolo_get_last_dets(stereo_yolo_det_t *dets, ot_u32 max_dets)
+{
+    ot_u32 n = (g_last_det_count < max_dets) ? g_last_det_count : max_dets;
+
+    if (dets != NULL && n > 0) {
+        memcpy(dets, g_last_dets, n * sizeof(stereo_yolo_det_t));
+    }
+    return n;
 }
 
 /* Dark pill + white glyphs, centered at (cx0, cy0). */

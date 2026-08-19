@@ -22,6 +22,7 @@
 #include "stereo_network.h"
 #include "stereo_types.h"
 #include "stereo_media.h"
+#include "stereo_yolo.h"
 
 static ot_s32 g_listen_fd  = -1;
 static ot_s32 g_client_fd  = -1;
@@ -200,10 +201,23 @@ ot_s32 stereo_network_send(const stereo_venc_output_t *output)
     /* Send perf timing after frame triplet */
     double npu_ms = 0, sub_ms = 0;
     stereo_media_get_perf(&npu_ms, &sub_ms);
-    char perf_json[128];
+    stereo_yolo_det_t dets[STEREO_YOLO_MAX_DETS];
+    ot_u32 ndet = stereo_yolo_get_last_dets(dets, STEREO_YOLO_MAX_DETS);
+    char det_buf[1024];
+    int doff = 0;
+
+    doff += snprintf(det_buf + doff, sizeof(det_buf) - doff, "[");
+    for (ot_u32 i = 0; i < ndet && doff < (int)sizeof(det_buf) - 16; i++) {
+        doff += snprintf(det_buf + doff, sizeof(det_buf) - doff,
+                         "%s[%u,%d]", i ? "," : "",
+                         dets[i].class_id, dets[i].distance_mm);
+    }
+    doff += snprintf(det_buf + doff, sizeof(det_buf) - doff, "]");
+
+    char perf_json[1400];
     snprintf(perf_json, sizeof(perf_json),
-             "{\"npu_ms\":%.1f,\"sub_ms\":%.1f,\"total_ms\":%.1f}",
-             npu_ms, sub_ms, npu_ms + sub_ms);
+             "{\"npu_ms\":%.1f,\"sub_ms\":%.1f,\"total_ms\":%.1f,\"dets\":%s}",
+             npu_ms, sub_ms, npu_ms + sub_ms, det_buf);
     stereo_jpeg_packet_t perf_pkt;
     memset(&perf_pkt, 0, sizeof(perf_pkt));
     perf_pkt.data = (ot_u8 *)perf_json;
