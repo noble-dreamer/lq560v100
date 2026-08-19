@@ -187,7 +187,7 @@ out->disp_bytes = up_w * up_h * sizeof(ot_u16);  // 614400 bytes
 | license文件 | `/opt/stereo/license.bin`（64B，设备绑定授权） |
 | auth_gen | `/tmp/auth_gen`（临时部署，运行后可删除） |
 | scene参数 | `/opt/stereo/param/sc132gs/` |
-| yolo模型 | `/opt/model/tiny-yolov3_yuv420sp_b.ortm`（9MB，`/data` 放不下，放 `/opt`） |
+| yolo模型 | `/data/model/tiny-yolov3_yuv420sp_b.ortm`（9MB；新分区表 `/data` 64MB，够放） |
 | 源码 | `main/src/component/media/sample/stereo_app_bk/`（当前仓库布局，SDK 根=仓库根） |
 | 模型源文件 | 仓库根 `stereo_s_ori_h448_w640_128_sub_v1.7_e300_sim.ortm`（明文，加密后部署） |
 | 交叉工具链 | `/opt/linux/x86-arm/aarch64-otv02-linux-gnu-gcc/bin`（备选 `/home/lzx/gcc-aarch64-otv02-linux-gnu/aarch64-otv02-linux-gnu-gcc/bin`） |
@@ -215,7 +215,7 @@ sshpass -p "123456" scp main/src/component/media/sample/stereo_app_bk/scripts/lu
 sshpass -p "123456" scp main/src/component/media/sample/stereo_app_bk/scripts/lut_right.bin root@192.168.1.101:/opt/stereo/lut_right.bin
 # 模型必须按“模块8”用板端 UID 加密，再部署为 /data/model/stereo_match.ortm.enc
 # yolo 模型（非设备绑定，直接拷贝）：
-sshpass -p "123456" scp ~/npu_toolchain/common/samples/tiny-yolov3_yuv420sp/tiny-yolov3_yuv420sp_b.ortm root@192.168.1.101:/opt/model/
+sshpass -p "123456" scp ~/npu_toolchain/common/samples/tiny-yolov3_yuv420sp/tiny-yolov3_yuv420sp_b.ortm root@192.168.1.101:/data/model/
 
 # 运行完整链路
 sshpass -p "123456" ssh root@192.168.1.101 "cd /opt/stereo && ./stereo_app"
@@ -918,7 +918,7 @@ cd /opt/stereo && ./run.sh &
 
 ### 非协商 API 事实（均已板端实测）
 
-- **`ot_avp_npu_load_model_from_mem` 的模型走异步 trigger/wait 会永久卡在 wait**（同步 execute 正常）。必须解密成 `/tmp/stereo_plain.ortm` 文件、`ot_avp_npu_load_model` 加载，load 后立即 unlink。yolo 明文模型在 `/opt/model/tiny-yolov3_yuv420sp_b.ortm`（`/data` 放不下）。
+- **`ot_avp_npu_load_model_from_mem` 的模型走异步 trigger/wait 会永久卡在 wait**（同步 execute 正常）。必须解密成 `/tmp/stereo_plain.ortm` 文件、`ot_avp_npu_load_model` 加载，load 后立即 unlink。yolo 明文模型在 `/data/model/tiny-yolov3_yuv420sp_b.ortm`。
 - NPU 输出禁整块拷贝、禁逐元素读 `ot_avp_npu_malloc` 内存：F32 视差 286KB 标量扫描 ~18ms/帧；保留 SMR cached 输出 + `ot_smr_flush_cache` 为 ~1.3ms。yolo 输出走 stride 对齐的就地懒读（先读 objectness，过阈才读 85 值组）。
 - VPROC chn 级 crop 在 **chn 缩放之后**生效：全幅 1080×1280 先缩到竖版 352×416，再 chn crop (20,0,312,416) 等效源空间 960×1280@x=60；把 crop 写成源空间坐标会得到 416×252 错误输出。
 - 检测通道 attr 竖版 312×416（270° 交换宽高、height 16 对齐）、`compress_mode=NONE`、FRC src=30 dst=10。本 app 名义 20fps 但实测传感器出帧 ~30fps（scene_auto 的 `ot_scene_set_static_ae` 按 `config_product_scene_1p5m30_built_in.ini` 的 `frame_rate=3000` 把 AE 帧率覆盖成 30），src=20 会得到 15fps。
@@ -970,7 +970,7 @@ ssh root@192.168.1.101 "reboot"                                  # u-boot 自动
 
 1. 基础固件：新板用烧写工具 + `nand_burn_table.xml` 整片烧写（或已带系统时按上面对照内核编译时间确认版本）；不一致再 OTA。
 2. 网络：按 `board-network-setup` skill 部署 RNDIS+SSH（新板可能默认 UVC 模式）。
-3. 通用资产直接拷贝：`stereo_app`、`/opt/model/tiny-yolov3_yuv420sp_b.ortm`、`/opt/stereo/param/sc132gs/`。
+3. 通用资产直接拷贝：`stereo_app`、`/data/model/tiny-yolov3_yuv420sp_b.ortm`、`/opt/stereo/param/sc132gs/`。
 4. **设备绑定重做（旧板文件不可复用）**：新板 `/tmp/auth_gen` 取新 UID → 主机 `encrypt_model` 重新加密 → 生成新板自己的 `/opt/stereo/license.bin` 与 `/data/model/stereo_match.ortm.enc`。
 5. **新相机重新标定**：`stereo_calib.json`、`lut_left.bin`、`lut_right.bin` 每台不同，复用旧标定会导致矫正与距离不准。
 6. 重启验证：`cd /opt/stereo && ./stereo_app`，主机 `stereo_receiver.py` 检查左图框/距离、右图、视差。

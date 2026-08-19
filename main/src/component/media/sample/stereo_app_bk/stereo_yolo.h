@@ -13,9 +13,8 @@
 extern "C" {
 #endif
 
-/* /data (35MB UBIFS) holds the 28MB encrypted stereo model and cannot fit
-   the 9MB yolo model; /opt/model persists across reboot the same way. */
-#define STEREO_YOLO_MODEL_PATH   "/opt/model/tiny-yolov3_yuv420sp_b.ortm"
+/* 新相机 /data 分区 64MB（剩余 ~32MB），yolo 模型放 /data/model 持久化。 */
+#define STEREO_YOLO_MODEL_PATH   "/data/model/tiny-yolov3_yuv420sp_b.ortm"
 #define STEREO_YOLO_INPUT_DIM    (416)
 #define STEREO_YOLO_INPUT_BYTES  (STEREO_YOLO_INPUT_DIM * STEREO_YOLO_INPUT_DIM * 3 / 2)
 #define STEREO_YOLO_DET_W        (416)

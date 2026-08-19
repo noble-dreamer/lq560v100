@@ -542,13 +542,13 @@ sshpass -p 123456 scp \
   main/src/component/media/sample/stereo_app_bk/stereo_app \
   root@192.168.1.101:/opt/stereo/stereo_app
 # yolo 模型只部署一次（9MB，UBIFS 压缩后占 /opt 约 6.2MB）：
-sshpass -p 123456 ssh root@192.168.1.101 "mkdir -p /opt/model"
+sshpass -p 123456 ssh root@192.168.1.101 "mkdir -p /data/model"
 sshpass -p 123456 scp \
   /home/lzx/npu_toolchain/common/samples/tiny-yolov3_yuv420sp/tiny-yolov3_yuv420sp_b.ortm \
-  root@192.168.1.101:/opt/model/tiny-yolov3_yuv420sp_b.ortm
+  root@192.168.1.101:/data/model/tiny-yolov3_yuv420sp_b.ortm
 ```
 
-板端资产约定：stereo 加密模型 `/data/model/stereo_match.ortm.enc`（28MB，每次启动解密到 `/tmp/stereo_plain.ortm`、load 后即删）；yolo 明文 `/opt/model/tiny-yolov3_yuv420sp_b.ortm`（`/data` 装不下第二个模型，改放 `/opt`，重启不丢）；标定/LUT/license 在 `/opt/stereo/`。yolo 模型缺失时 stereo_app 自动降级纯 stereo，不会崩溃。
+板端资产约定：stereo 加密模型 `/data/model/stereo_match.ortm.enc`（28MB，每次启动解密到 `/tmp/stereo_plain.ortm`、load 后即删）；yolo 明文 `/data/model/tiny-yolov3_yuv420sp_b.ortm`（新分区表 `/data` 64MB，直接放 `/data`）；标定/LUT/license 在 `/opt/stereo/`。yolo 模型缺失时 stereo_app 自动降级纯 stereo，不会崩溃。
 
 #### 运行（板端执行）
 
@@ -684,7 +684,7 @@ sshpass -p 123456 ssh root@192.168.1.101 "reboot"
    sshpass -p 123456 scp main/src/component/media/sample/stereo_app_bk/stereo_app \
      root@<新板IP>:/opt/stereo/stereo_app
    sshpass -p 123456 scp ~/npu_toolchain/common/samples/tiny-yolov3_yuv420sp/tiny-yolov3_yuv420sp_b.ortm \
-     root@<新板IP>:/opt/model/tiny-yolov3_yuv420sp_b.ortm
+     root@<新板IP>:/data/model/tiny-yolov3_yuv420sp_b.ortm
    # scene 参数目录也整体拷贝
    ```
 4. **设备绑定资产（每台设备必须重做，不能复用旧板文件）**：stereo 模型是按 UID 加密 + license 校验的。新板先跑 `/tmp/auth_gen` 拿到新 UID，主机用新 UID 重新 `encrypt_model` 生成 `/data/model/stereo_match.ortm.enc`，并生成新板自己的 `/opt/stereo/license.bin`（见项目 skill「模块8」完整流程）。
