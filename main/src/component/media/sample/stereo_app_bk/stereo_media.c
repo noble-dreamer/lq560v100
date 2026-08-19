@@ -1374,6 +1374,19 @@ static void *stereo_npu_proc(void *p)
             }
         }
 
+        /* 矫正边缘/无有效视差区域：模型输出会饱和到最大视差候选（128px，
+           实测可达 ~137px）。把这些超限值掩膜为 0（无效），主机端已有的
+           "q5<0.1 -> 黑色" 渲染逻辑自动生效，框中心距离也因 q5<16 被跳过。 */
+        {
+            ot_u16 *dp = out->disparity;
+            ot_u32 npix = out->disp_bytes / sizeof(ot_u16);
+            for (ot_u32 i = 0; i < npix; i++) {
+                if (dp[i] >= STEREO_NPU_COST_CHANNELS * 32) {
+                    dp[i] = 0;
+                }
+            }
+        }
+
         /* Finish the second model and decode boxes in 416x416 space; M5 maps
            them to the 1280x1080 left frame and draws the rectangles. */
         if (det_ready) {
